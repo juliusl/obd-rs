@@ -6,9 +6,18 @@
 //! Teardown is order sensitive - LUN symlink, `lun_0`, `tpgt_1`, `naa.*`,
 //! backstore, HBA - and every step here is idempotent so the cleanup sweep can
 //! safely run over a half-built device.
+//!
+//! # Tracing
+//!
+//! This is the crate's hot file: every wait in the lifecycle is a poll loop
+//! here. The `trace` events are deliberately concentrated in it so that
+//! enabling `obd::configfs=trace` gives timing for device attach, node
+//! resolution and SCSI teardown without turning on anything else.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+use tracing::{debug, error, instrument, trace, warn};
 
 use crate::error::{Error, Result};
 
@@ -23,22 +32,28 @@ pub const NAA_PREFIX: &str = "naa.5001405e0b0d";
 /// Mirrors what accelerated-container-image's snapshotter uses.
 pub const MAX_DATA_AREA_MB: u32 = 4;
 
+/// Root of the SCSI target subsystem in configfs.
 pub fn configfs_root() -> PathBuf {
     PathBuf::from(CONFIGFS)
 }
 
+/// Directory for a device's `target_core_user` backstore.
 pub fn backstore_path(name: &str) -> PathBuf {
     configfs_root().join("core").join(CORE_HBA).join(name)
 }
 
+/// Target portal group for a `tcm_loop` nexus.
 pub fn tpgt_path(naa: &str) -> PathBuf {
     configfs_root().join("loopback").join(naa).join("tpgt_1")
 }
 
+/// LUN 0 under a nexus; the only LUN this crate creates.
 pub fn lun0_path(naa: &str) -> PathBuf {
     tpgt_path(naa).join("lun").join("lun_0")
 }
 
+/// The symlink that binds a backstore to LUN 0, which is what makes the
+/// device appear as a `/dev/sdX`.
 pub fn lun_link_path(naa: &str, name: &str) -> PathBuf {
     lun0_path(naa).join(name)
 }
@@ -52,32 +67,66 @@ pub fn lun_link_path(naa: &str, name: &str) -> PathBuf {
 pub fn write_attr(path: &Path, value: &str, retries: u32, delay: Duration) -> Result<()> {
     use std::io::Write;
 
+    let started = Instant::now();
     let mut last: Option<std::io::Error> = None;
+    let mut attempts = 0u32;
+
     for _ in 0..retries.max(1) {
-        match std::fs::OpenOptions::new().write(true).open(path) {
-            Ok(mut file) => match file.write_all(value.as_bytes()) {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    let again = err.raw_os_error() == Some(11); // EAGAIN
-                    last = Some(err);
-                    if !again {
-                        break;
-                    }
+        attempts += 1;
+        let outcome = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(value.as_bytes()));
+
+        match outcome {
+            Ok(()) => {
+                trace!(
+                    attempts,
+                    elapsed_us = started.elapsed().as_micros() as u64,
+                    "configfs-write"
+                );
+                if attempts > 1 {
+                    // The EAGAIN retry is defensive: reaching here means the
+                    // daemon was still attaching and the loop covered for it.
+                    warn!(
+                        attribute = %path.display(),
+                        attempts,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "configfs accepted the write only after retrying EAGAIN; \
+                         the overlaybd daemon was still attaching the device"
+                    );
                 }
-            },
+                debug!(
+                    "wrote '{value}' to the configfs attribute {} after {attempts} attempt(s)",
+                    path.display()
+                );
+                return Ok(());
+            }
             Err(err) => {
-                let again = err.raw_os_error() == Some(11);
+                let again = err.raw_os_error() == Some(11); // EAGAIN
                 last = Some(err);
                 if !again {
                     break;
                 }
+                trace!(attempts, "configfs-eagain");
             }
         }
         std::thread::sleep(delay);
     }
+
+    let err = last.unwrap_or_else(|| std::io::Error::other("unknown configfs failure"));
+    // Syscall-adjacent edge: remediation is almost always outside this process
+    // (module not loaded, daemon dead, wrong path in the device config).
+    error!(
+        attribute = %path.display(),
+        value,
+        attempts,
+        errno = err.raw_os_error().unwrap_or(-1),
+        "configfs rejected the write: {err}"
+    );
     Err(Error::io(
         format!("writing '{value}' to {}", path.display()),
-        last.unwrap_or_else(|| std::io::Error::other("unknown configfs failure")),
+        err,
     ))
 }
 
@@ -129,6 +178,7 @@ fn node_readable(node: &Path) -> bool {
 /// node exists, its `dev_t` matches what sysfs reports, *and* it is readable.
 /// Without both waits, back-to-back runs intermittently fail with
 /// `mount: /dev/sdb is not a valid block device`.
+#[instrument(level = "debug", skip_all, fields(device = %device, naa = %naa))]
 pub fn resolve_block_device(
     device: &str,
     naa: &str,
@@ -141,10 +191,24 @@ pub fn resolve_block_device(
         .to_string();
 
     let block_dir = PathBuf::from(format!("/sys/class/scsi_device/{address}:0/device/block"));
-    let deadline = Instant::now() + timeout;
+    debug!(
+        "resolving the block device for {device} from SCSI address {address}, \
+         watching {}",
+        block_dir.display()
+    );
+
+    let started = Instant::now();
+    let deadline = started + timeout;
     let mut last_seen = String::new();
+    let mut polls = 0u32;
+    // A node whose dev_t does not match sysfs is a *recycled* node: mounting it
+    // would have reached the wrong device. Counted separately from a node that
+    // simply is not readable yet, which is ordinary attach latency.
+    let mut recycled = 0u32;
+    let mut not_ready = 0u32;
 
     while Instant::now() < deadline {
+        polls += 1;
         if block_dir.is_dir()
             && let Ok(entries) = std::fs::read_dir(&block_dir)
         {
@@ -156,17 +220,62 @@ pub fn resolve_block_device(
             if let Some(name) = names.first() {
                 last_seen = name.clone();
                 let node = PathBuf::from("/dev").join(name);
-                if let Some(devt) = sysfs_devt(&block_dir.join(name).join("dev"))
-                    && node_matches(&node, devt)
-                    && node_readable(&node)
-                {
-                    return Ok((node, address));
+                if let Some(devt) = sysfs_devt(&block_dir.join(name).join("dev")) {
+                    let matches = node_matches(&node, devt);
+                    if matches && node_readable(&node) {
+                        trace!(
+                            polls,
+                            recycled,
+                            not_ready,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "node-resolved"
+                        );
+                        if recycled > 0 {
+                            // Worth surfacing: without the dev_t check we would
+                            // have mounted a node belonging to a torn-down
+                            // device, which is the failure this guard exists for.
+                            warn!(
+                                device,
+                                node = %node.display(),
+                                recycled_polls = recycled,
+                                "skipped a recycled device node before mounting; tcm_loop had \
+                                 reused this SCSI address for a previous device"
+                            );
+                        }
+                        debug!(
+                            "resolved {device} to {} after {polls} poll(s) \
+                             ({not_ready} not-ready, {recycled} recycled)",
+                            node.display()
+                        );
+                        return Ok((node, address));
+                    }
+                    // Ordinary attach latency is flow information, not a
+                    // warning: it happens on most launches.
+                    if matches {
+                        not_ready += 1;
+                        trace!(polls, node = %node.display(), "node-not-readable");
+                    } else {
+                        recycled += 1;
+                        trace!(polls, node = %node.display(), "node-recycled");
+                    }
                 }
             }
         }
         std::thread::sleep(Duration::from_millis(200));
     }
 
+    // Non-recoverable: the caller cannot mount anything without a node, and
+    // the fix (udev, tcm_loop) is outside this process.
+    error!(
+        device,
+        expected_at = %block_dir.display(),
+        last_seen = %if last_seen.is_empty() { "<nothing>" } else { &last_seen },
+        polls,
+        recycled,
+        not_ready,
+        timeout_s = timeout.as_secs(),
+        "no usable block device appeared before the timeout"
+    );
     Err(Error::NoBlockDevice {
         device: device.to_string(),
         path: block_dir,
@@ -185,9 +294,28 @@ pub fn resolve_block_device(
 /// about to vanish.
 pub fn wait_for_scsi_removal(address: &str, timeout: Duration) {
     let target = PathBuf::from(format!("/sys/class/scsi_device/{address}:0"));
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut polls = 0u32;
+
     while target.exists() && Instant::now() < deadline {
+        polls += 1;
         std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    trace!(polls, elapsed_ms, "scsi-removal");
+    if target.exists() {
+        // Not fatal here - teardown has already removed the configfs entries -
+        // but the next device on this address may race, so say so.
+        warn!(
+            scsi_address = address,
+            elapsed_ms,
+            "SCSI device did not disappear before the timeout; a device reusing this \
+             address may fail to resolve its node"
+        );
+    } else {
+        debug!("SCSI device {address}:0 disappeared after {elapsed_ms}ms");
     }
 }
 
@@ -196,23 +324,50 @@ pub fn wait_for_scsi_removal(address: &str, timeout: Duration) {
 /// overlaybd reports launch failures here rather than through the configfs
 /// write, so this has to be checked explicitly after `enable`.
 pub fn await_result(result_file: &Path, timeout: Duration) -> String {
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut polls = 0u32;
+
     while Instant::now() < deadline {
+        polls += 1;
         if let Ok(text) = std::fs::read_to_string(result_file) {
             let trimmed = text.trim();
             if !trimmed.is_empty() {
+                trace!(
+                    polls,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "result-file"
+                );
+                debug!(
+                    "overlaybd reported '{trimmed}' in {} after {polls} poll(s)",
+                    result_file.display()
+                );
                 return trimmed.to_string();
             }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    trace!(
+        polls,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "result-file-timeout"
+    );
+    debug!(
+        "overlaybd wrote nothing to {} within {}s",
+        result_file.display(),
+        timeout.as_secs()
+    );
     String::new()
 }
 
 /// Remove a symlink, ignoring "already gone".
 pub fn rm_symlink(path: &Path) {
     if path.symlink_metadata().is_ok() {
-        let _ = std::fs::remove_file(path);
+        match std::fs::remove_file(path) {
+            Ok(()) => debug!("removed the LUN symlink {}", path.display()),
+            Err(err) => debug!("could not remove the LUN symlink {}: {err}", path.display()),
+        }
     }
 }
 
@@ -222,7 +377,15 @@ pub fn rm_symlink(path: &Path) {
 /// under it, which is why this is deliberately infallible.
 pub fn rmdir(path: &Path) {
     if path.is_dir() {
-        let _ = std::fs::remove_dir(path);
+        match std::fs::remove_dir(path) {
+            Ok(()) => debug!("removed the configfs directory {}", path.display()),
+            // Expected for the shared HBA while other devices still live under
+            // it, so this is flow information rather than a problem.
+            Err(err) => debug!(
+                "left the configfs directory {} in place: {err}",
+                path.display()
+            ),
+        }
     }
 }
 

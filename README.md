@@ -110,6 +110,66 @@ CLI exits in between, so:
   device as it exited. If you write library code that must outlive its handle,
   use `persist()` too.
 
+## Diagnostics
+
+The library emits [`tracing`](https://docs.rs/tracing) events and installs no
+subscriber, so it costs nothing until a binary opts in. `obdctl` installs one,
+plus [`color-eyre`](https://docs.rs/color-eyre) as the error report handler.
+
+Severities are used deliberately rather than by feel:
+
+| Level | What it is for | Examples here |
+| --- | --- | --- |
+| `error` | Non-recoverable failures, especially syscall edges whose remedy is outside this process | `mount(2)` failed, configfs rejected a write, no block device appeared |
+| `warn` | Defensive code that actually fired | EAGAIN retry covered for a daemon still attaching, unmount succeeded only after retries, a recycled device node was skipped, teardown ran from `Drop` |
+| `info` | The audit trail | Every layer created or committed, config written, device launched, mounted, unmounted or removed |
+| `debug` | Flow and state transitions | Which binary was found where, each configfs write, each teardown step |
+| `trace` | Timing and counts from the polling loops | `configfs-write`, `result-file`, `node-resolved`, `unmount`, `device-up` |
+
+`info` alone is a complete record of what this crate did to the host, which is
+what makes it worth leaving on.
+
+```console
+$ obdctl device up --name poc_a --config d.json --result-file r --naa-suffix 0021 --mount /mnt/obd-a
+ INFO obdctl::device: launched an overlaybd device device=poc_a block_device=/dev/sda naa=naa.5001405e0b0d0021 scsi_address=0:0:1
+ INFO obdctl::device: mounted an overlaybd device mountpoint=/mnt/obd-a mode=rw
+```
+
+Verbosity is `-v` for debug and `-vv` for trace, or `RUST_LOG` for full control.
+The traces are concentrated in `obd::configfs`, so the waits can be measured
+without turning anything else on:
+
+```console
+$ RUST_LOG=obd::configfs=trace obdctl device up ...
+TRACE configfs-write attempts=1 elapsed_us=1126
+TRACE result-file polls=1 elapsed_ms=0
+TRACE resolve_block_device{device=poc_a naa=naa.5001405e0b0d0021}: node-resolved polls=2 recycled=0 not_ready=0 elapsed_ms=206
+```
+
+Failures come back as a `color-eyre` report: the context chain, where it
+happened, and the span trace showing which operation was running.
+
+```console
+$ obdctl layer commit --data missing.data --index missing.index --out out.commit
+Error:
+   0: committing missing.data into the read-only layer out.commit
+   1: overlaybd binary `overlaybd-commit` not found in [...]; run scripts/install-overlaybd.sh, or set OVERLAYBD_BIN_DIR
+
+Location:
+   src/bin/obdctl.rs:311
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ SPANTRACE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   0: obdctl::obdctl::layer
+      at src/bin/obdctl.rs:276
+```
+
+`RUST_BACKTRACE=1` adds the backtrace, `RUST_BACKTRACE=full` adds source
+snippets. Logs go to stderr, so `--json` output on stdout stays parseable.
+
+The library keeps typed [`thiserror`](https://docs.rs/thiserror) errors and does
+**not** pull in eyre: picking a report handler is the binary's call, not a
+library's.
+
 ## Layout
 
 | Path | Purpose |
@@ -120,11 +180,12 @@ CLI exits in between, so:
 | `src/config.rs` | Device config JSON, local and streamed lowers |
 | `src/tools.rs` | `overlaybd-create` / `overlaybd-commit`, binary discovery |
 | `src/cleanup.rs` | Convention sweep, signal handling |
-| `src/bin/obdctl.rs` | The CLI |
+| `src/bin/obdctl.rs` | The CLI, plus the subscriber and color-eyre setup |
 | `build.rs` | Build-time probe (warns only) |
 | `scripts/install-overlaybd.sh` | PMC install and layout wiring |
 | `tests/api.rs` | Tests that run anywhere, including macOS |
-| `tests/lima-e2e.sh` | Real device lifecycle; needs Linux and root |
+| `tests/linux_device.rs` | Library device lifecycle; needs Linux and root |
+| `tests/lima-e2e.sh` | `obdctl` device lifecycle; needs Linux and root |
 | `lima-dev.yaml` | Lima VM for developing from macOS |
 
 ## Why the install script does more than `apt install`
@@ -157,8 +218,18 @@ cargo test                                  # anywhere, including macOS
 limactl start --name=obd-dev --mount "$PWD" ./lima-dev.yaml
 limactl shell obd-dev
 sudo ./scripts/install-overlaybd.sh
-cargo build && sudo ./tests/lima-e2e.sh     # real devices
+
+# Real devices, two ways:
+sudo -E OBD_DEVICE_TESTS=1 cargo test --test linux_device -- --test-threads=1
+cargo build && sudo ./tests/lima-e2e.sh
 ```
+
+`tests/linux_device.rs` drives the **library** API, and `tests/lima-e2e.sh`
+drives `obdctl`. Both are needed: the CLI always hands devices off with
+`persist()`, so the RAII paths - an explicit `down()`, and teardown from `Drop` -
+are only covered by the library tests. They mutate global host state, hence
+`--test-threads=1`, and skip unless `OBD_DEVICE_TESTS` is set so a plain
+`cargo test` stays green anywhere.
 
 overlaybd is architecture independent, so the Lima VM works on Apple Silicon;
 nothing here needs x86_64.

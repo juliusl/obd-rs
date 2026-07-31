@@ -59,6 +59,29 @@
 //! configfs, TCMU and `mount(2)` are Linux-only. The types compile everywhere
 //! so the crate can be developed and unit-tested on other platforms, but the
 //! device operations return [`Error::UnsupportedPlatform`] off Linux.
+//!
+//! # Tracing
+//!
+//! This crate emits [`tracing`] events and installs no subscriber, so it costs
+//! nothing until a binary opts in. Severities are used deliberately:
+//!
+//! | Level | What it is for |
+//! | --- | --- |
+//! | `error` | Non-recoverable failures, especially syscall edges whose remedy is outside this process |
+//! | `warn` | Defensive code that actually fired: an EAGAIN retry, a busy unmount, teardown from `Drop` |
+//! | `info` | The audit trail. Every layer written, config written, device launched, mounted, unmounted or removed |
+//! | `debug` | Flow and state transitions, enough to reason about a run after the fact |
+//! | `trace` | Timing and counts from the polling loops, concentrated in [`configfs`] |
+//!
+//! The `info` level alone is a complete record of what this crate did to the
+//! host, which is what makes it useful to keep on in production. To debug a
+//! device that will not attach, `obd=debug` shows the lifecycle; to investigate
+//! slow attaches or the `tcm_loop` recycling race, `obd::configfs=trace` adds
+//! per-poll timings without the rest.
+
+// The repo convention: every public API carries a doc-header and every public
+// field is documented. This lint keeps that honest.
+#![warn(missing_docs)]
 
 pub mod cleanup;
 pub mod config;
@@ -81,9 +104,13 @@ use std::path::PathBuf;
 /// One preflight finding.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Check {
+    /// What was checked, e.g. `module tcm_loop`, phrased so it reads the same
+    /// whether it passed or failed.
     pub name: String,
+    /// Whether the requirement is satisfied.
     pub ok: bool,
-    /// What to do about it, when it failed.
+    /// The remedy, present only when the check failed. Written as a command
+    /// the operator can run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
 }

@@ -8,18 +8,25 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
+use tracing::{debug, info, instrument, warn};
+
 use crate::configfs::{self, DEV_PREFIX, NAA_PREFIX};
 use crate::error::Result;
 
 /// What a sweep removed, for reporting.
 #[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Swept {
+    /// `tcm_loop` nexuses removed, by NAA name.
     pub nexuses: Vec<String>,
+    /// `target_core_user` backstores removed, by device name.
     pub backstores: Vec<String>,
+    /// Mountpoints that were mounted and are no longer.
     pub unmounted: Vec<PathBuf>,
 }
 
 impl Swept {
+    /// True when the sweep found nothing to remove, which is the expected
+    /// result on a host with no interrupted runs.
     pub fn is_empty(&self) -> bool {
         self.nexuses.is_empty() && self.backstores.is_empty() && self.unmounted.is_empty()
     }
@@ -44,18 +51,28 @@ pub fn unmount_path(target: &Path) -> bool {
     use rustix::mount::{UnmountFlags, unmount};
 
     if !is_mounted(target) {
+        debug!("{} is not mounted; nothing to unmount", target.display());
         return false;
     }
     rustix::fs::sync();
-    for _ in 0..20 {
+    for attempt in 1..=20u32 {
         if unmount(target, UnmountFlags::empty()).is_ok() {
+            // Auditable: a filesystem is no longer visible on this host.
+            info!(mountpoint = %target.display(), attempts = attempt, "unmounted during cleanup");
             return true;
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+    // Cleanup is best effort by design, but leaving a mount behind blocks the
+    // configfs teardown that follows, so it must not pass silently.
+    warn!(
+        mountpoint = %target.display(),
+        "could not unmount during cleanup; the device behind it cannot be torn down"
+    );
     false
 }
 
+/// Always false off Linux, where nothing can be mounted by this crate.
 #[cfg(not(target_os = "linux"))]
 pub fn unmount_path(_target: &Path) -> bool {
     false
@@ -65,8 +82,12 @@ pub fn unmount_path(_target: &Path) -> bool {
 /// a previous crashed run.
 ///
 /// Safe to call repeatedly, and safe to call when nothing is left.
+#[instrument(level = "debug", skip_all)]
 pub fn cleanup_all() -> Swept {
     let mut swept = Swept::default();
+    debug!(
+        "sweeping configfs for backstores prefixed '{DEV_PREFIX}' and nexuses prefixed '{NAA_PREFIX}'"
+    );
 
     let loopback = configfs::configfs_root().join("loopback");
     if loopback.is_dir()
@@ -101,6 +122,8 @@ pub fn cleanup_all() -> Swept {
             configfs::rmdir(&lun0);
             configfs::rmdir(&configfs::tpgt_path(&naa));
             configfs::rmdir(&naa_dir);
+            // Auditable: removing host state that outlived its process.
+            info!(nexus = %naa, "removed a stale tcm_loop nexus");
             swept.nexuses.push(naa);
         }
     }
@@ -121,12 +144,18 @@ pub fn cleanup_all() -> Swept {
                 .into_owned();
             if backstore.is_dir() && name.starts_with(DEV_PREFIX) {
                 configfs::rmdir(&backstore);
+                info!(backstore = %name, "removed a stale overlaybd backstore");
                 swept.backstores.push(name);
             }
         }
     }
     configfs::rmdir(&hba);
 
+    debug!(
+        "sweep removed {} nexus(es) and {} backstore(s)",
+        swept.nexuses.len(),
+        swept.backstores.len()
+    );
     swept
 }
 
@@ -134,6 +163,7 @@ pub fn cleanup_all() -> Swept {
 ///
 /// This is what `obdctl cleanup` runs: the mounts have to go first, since a
 /// mounted device cannot be torn down.
+#[instrument(level = "debug", skip_all, fields(mountpoints = mountpoints.len()))]
 pub fn force_cleanup(mountpoints: &[PathBuf]) -> Result<Swept> {
     let mut unmounted = Vec::new();
     for target in mountpoints {
@@ -159,8 +189,15 @@ pub fn install_signal_handler(mountpoints: Vec<PathBuf>) -> Result<()> {
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])
         .map_err(|e| crate::error::Error::io("installing signal handler", e))?;
 
+    debug!("installed a cleanup handler for SIGINT, SIGTERM and SIGHUP");
     std::thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
+            // Deliberately not inside the signal handler: this does filesystem
+            // and configfs work that is not async-signal-safe.
+            warn!(
+                signal,
+                "caught a termination signal; sweeping devices before exiting"
+            );
             let _ = force_cleanup(&mountpoints);
             std::process::exit(128 + signal);
         }
@@ -168,6 +205,7 @@ pub fn install_signal_handler(mountpoints: Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// No-op off Linux: there are no devices to clean up.
 #[cfg(not(target_os = "linux"))]
 pub fn install_signal_handler(_mountpoints: Vec<PathBuf>) -> Result<()> {
     Ok(())

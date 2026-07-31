@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
 
 use crate::error::{Error, Result};
 
@@ -20,7 +21,10 @@ pub enum Lower {
     /// blob; it never fetches a manifest. That is why the blob can be pushed as
     /// a plain OCI artifact rather than as a container image.
     Remote {
+        /// Content digest of the layer blob, `sha256:...`. overlaybd appends
+        /// this to `repoBlobUrl` to build the URL it reads from.
         digest: String,
+        /// Size of the blob in bytes, as reported by the registry.
         size: u64,
         /// Where overlaybd may persist what it has fetched. `None` leaves the
         /// layer purely streamed (it still uses the daemon's own block cache).
@@ -39,6 +43,9 @@ impl Lower {
     pub fn remote(digest: impl Into<String>, size: u64) -> Result<Self> {
         let digest = digest.into();
         if !digest.starts_with("sha256:") {
+            debug!(
+                "rejecting the layer digest '{digest}': overlaybd appends it to repoBlobUrl and expects sha256:"
+            );
             return Err(Error::BadDigest { digest });
         }
         Ok(Lower::Remote {
@@ -177,6 +184,11 @@ impl DeviceConfig {
     /// Render to JSON, validating the combination first.
     pub fn to_json(&self) -> Result<String> {
         if self.has_remote_lowers() && self.repo_blob_url.is_none() {
+            debug!(
+                "rejecting a config with {} lower(s) because a remote lower was given \
+                 without a repoBlobUrl",
+                self.lowers.len()
+            );
             return Err(Error::MissingRepoBlobUrl);
         }
         let repr = DeviceConfigRepr {
@@ -200,8 +212,35 @@ impl DeviceConfig {
         }
         let mut json = self.to_json()?;
         json.push('\n');
-        std::fs::write(path, json)
+        std::fs::write(path, &json)
             .map_err(|e| Error::io(format!("writing {}", path.display()), e))?;
+
+        // Auditable: this file tells the daemon which layer bytes to serve, so
+        // it is worth a durable record of what was written and where.
+        info!(
+            config = %path.display(),
+            lowers = self.lowers.len(),
+            writable = self.upper.is_some(),
+            streamed = self.has_remote_lowers(),
+            "wrote an overlaybd device config"
+        );
+        // Deliberately not the raw JSON: repoBlobUrl is caller-supplied and a
+        // pre-signed or token-bearing blob URL would end up in the log the
+        // moment someone enabled debug to chase an attach problem.
+        debug!(
+            "device config {} describes {} lower(s){}, upper={}, repoBlobUrl={}",
+            path.display(),
+            self.lowers.len(),
+            if self.has_remote_lowers() {
+                " including streamed layers"
+            } else {
+                ""
+            },
+            self.upper.is_some(),
+            self.repo_blob_url
+                .as_deref()
+                .map_or("<none>", |_| "<set, redacted>")
+        );
         Ok(())
     }
 }

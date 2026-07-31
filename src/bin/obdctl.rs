@@ -8,12 +8,29 @@
 //! process and `device down` in another need no state file. `device up`
 //! deliberately leaves the device running - see `--json` output for what a
 //! later teardown needs.
+//!
+//! # Diagnostics
+//!
+//! The library emits [`tracing`] events but installs no subscriber, so the
+//! choice of renderer belongs here. This binary installs
+//! [`color_eyre`] as the report handler and a `tracing-subscriber` fmt layer,
+//! plus a [`tracing_error::ErrorLayer`] so a failure report carries the span
+//! trace - which device, which operation - alongside the error chain.
+//!
+//! Verbosity: `-v` for debug, `-vv` for trace, or set `RUST_LOG` for full
+//! control (`RUST_LOG=obd::configfs=trace` isolates the polling loops).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use obd::{Device, DeviceConfig, Lower, Mode, Result, tools};
+use color_eyre::eyre::WrapErr;
+use obd::{Device, DeviceConfig, Lower, Mode, tools};
+use tracing::instrument;
+use tracing_error::ErrorLayer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 #[derive(Parser)]
 #[command(
@@ -26,6 +43,16 @@ struct Cli {
     /// Emit machine-readable JSON on stdout.
     #[arg(long, global = true)]
     json: bool,
+
+    /// Increase log verbosity: -v for debug, -vv for trace.
+    ///
+    /// RUST_LOG takes precedence when set.
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    verbose: u8,
+
+    /// Log timestamps and targets, for capturing output to a file.
+    #[arg(long, global = true)]
+    log_full: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -90,7 +117,7 @@ struct ConfigArgs {
     /// A streamed lower, as `sha256:...=SIZE`. Repeat for more.
     #[arg(long = "remote-lower", value_name = "DIGEST=SIZE")]
     remote_lowers: Vec<String>,
-    /// Base URL for streamed lowers, e.g. https://<registry>/v2/<repo>/blobs
+    /// Base URL for streamed lowers, e.g. `https://REGISTRY/v2/REPO/blobs`
     #[arg(long)]
     repo_blob_url: Option<String>,
     /// Sparse writable layer data file.
@@ -152,28 +179,65 @@ struct CleanupArgs {
     mounts: Vec<PathBuf>,
 }
 
-fn main() -> ExitCode {
+fn main() -> color_eyre::Result<ExitCode> {
     let cli = Cli::parse();
-    match run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("obdctl: {err}");
-            ExitCode::FAILURE
-        }
-    }
+    init_diagnostics(&cli)?;
+
+    // `run` returns the exit code rather than an error for a soft failure, so
+    // a preflight that merely found problems does not print an error report as
+    // though the tool had crashed.
+    run(&cli)
 }
 
-fn run(cli: &Cli) -> Result<()> {
+/// Install the error report handler and the log subscriber.
+///
+/// Logs go to stderr so `--json` output on stdout stays machine-readable.
+fn init_diagnostics(cli: &Cli) -> color_eyre::Result<()> {
+    color_eyre::install()?;
+
+    // RUST_LOG wins; otherwise -v/-vv pick a sensible default. The library is
+    // quiet at info, which is the audit trail.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(match cli.verbose {
+            0 => "obd=info,obdctl=info",
+            1 => "obd=debug,obdctl=debug",
+            _ => "obd=trace,obdctl=trace",
+        })
+    });
+
+    let layer = fmt::layer().with_writer(std::io::stderr);
+    let layer = if cli.log_full {
+        layer.with_target(true).boxed()
+    } else {
+        // Interactive default: the message and its fields, nothing else.
+        layer
+            .without_time()
+            .with_target(false)
+            .with_level(true)
+            .boxed()
+    };
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(layer)
+        // Captures the span stack so color-eyre can show it in a report.
+        .with(ErrorLayer::default())
+        .init();
+
+    Ok(())
+}
+
+fn run(cli: &Cli) -> color_eyre::Result<ExitCode> {
     match &cli.command {
         Command::Preflight => preflight(cli.json),
-        Command::Layer(cmd) => layer(cmd, cli.json),
-        Command::Config(args) => config(args, cli.json),
-        Command::Device(cmd) => device(cmd, cli.json),
-        Command::Cleanup(args) => cleanup(args, cli.json),
+        Command::Layer(cmd) => layer(cmd, cli.json).map(|()| ExitCode::SUCCESS),
+        Command::Config(args) => config(args, cli.json).map(|()| ExitCode::SUCCESS),
+        Command::Device(cmd) => device(cmd, cli.json).map(|()| ExitCode::SUCCESS),
+        Command::Cleanup(args) => cleanup(args, cli.json).map(|()| ExitCode::SUCCESS),
     }
 }
 
-fn preflight(json: bool) -> Result<()> {
+fn preflight(json: bool) -> color_eyre::Result<ExitCode> {
     let checks = obd::preflight();
     let failed = checks.iter().filter(|c| !c.ok).count();
 
@@ -198,20 +262,29 @@ fn preflight(json: bool) -> Result<()> {
         }
     }
 
-    if failed > 0 {
-        std::process::exit(1);
-    }
-    Ok(())
+    // A failed preflight is a finding, not a crash: report it through the exit
+    // code rather than an error report with a backtrace.
+    Ok(if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
-fn layer(cmd: &LayerCommand, json: bool) -> Result<()> {
+#[instrument(level = "info", skip_all, name = "obdctl::layer")]
+fn layer(cmd: &LayerCommand, json: bool) -> color_eyre::Result<()> {
     match cmd {
         LayerCommand::Create {
             data,
             index,
             size_gb,
         } => {
-            tools::create_sparse_layer(data, index, *size_gb)?;
+            tools::create_sparse_layer(data, index, *size_gb).wrap_err_with(|| {
+                format!(
+                    "creating a {size_gb}G sparse writable layer at {}",
+                    data.display()
+                )
+            })?;
             if json {
                 println!(
                     "{}",
@@ -233,7 +306,13 @@ fn layer(cmd: &LayerCommand, json: bool) -> Result<()> {
             out,
             message,
         } => {
-            let size = tools::commit_layer(data, index, out, message)?;
+            let size = tools::commit_layer(data, index, out, message).wrap_err_with(|| {
+                format!(
+                    "committing {} into the read-only layer {}",
+                    data.display(),
+                    out.display()
+                )
+            })?;
             if json {
                 println!("{}", serde_json::json!({ "layer": out, "size": size }));
             } else {
@@ -247,18 +326,19 @@ fn layer(cmd: &LayerCommand, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn config(args: &ConfigArgs, json: bool) -> Result<()> {
+#[instrument(level = "info", skip_all, name = "obdctl::config")]
+fn config(args: &ConfigArgs, json: bool) -> color_eyre::Result<()> {
     let mut config = DeviceConfig::new(&args.result_file);
     for path in &args.lowers {
         config = config.lower(Lower::file(path));
     }
     for spec in &args.remote_lowers {
-        let (digest, size) = spec.split_once('=').ok_or_else(|| obd::Error::BadDigest {
-            digest: format!("{spec} (expected DIGEST=SIZE)"),
-        })?;
-        let size: u64 = size.parse().map_err(|_| obd::Error::BadDigest {
-            digest: format!("{spec} (size must be a number)"),
-        })?;
+        let (digest, size) = spec
+            .split_once('=')
+            .ok_or_else(|| color_eyre::eyre::eyre!("--remote-lower must be DIGEST=SIZE: {spec}"))?;
+        let size: u64 = size
+            .parse()
+            .wrap_err_with(|| format!("--remote-lower size must be a byte count: {spec}"))?;
         config = config.lower(Lower::remote(digest, size)?);
     }
     if let Some(url) = &args.repo_blob_url {
@@ -268,7 +348,9 @@ fn config(args: &ConfigArgs, json: bool) -> Result<()> {
         config = config.upper(data, index);
     }
 
-    config.write(&args.out)?;
+    config
+        .write(&args.out)
+        .wrap_err_with(|| format!("writing the device config {}", args.out.display()))?;
     if json {
         println!(
             "{}",
@@ -280,7 +362,8 @@ fn config(args: &ConfigArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn device(cmd: &DeviceCommand, json: bool) -> Result<()> {
+#[instrument(level = "info", skip_all, name = "obdctl::device")]
+fn device(cmd: &DeviceCommand, json: bool) -> color_eyre::Result<()> {
     match cmd {
         DeviceCommand::Up(args) => {
             let device = Device::new(
@@ -289,13 +372,21 @@ fn device(cmd: &DeviceCommand, json: bool) -> Result<()> {
                 &args.result_file,
                 &args.naa_suffix,
             )?;
-            let live = device.up()?;
+            let live = device.up().wrap_err_with(|| {
+                format!(
+                    "launching device {} from {}",
+                    args.name,
+                    args.config.display()
+                )
+            })?;
 
             let persisted = match &args.mount {
                 None => live.persist(),
                 Some(mountpoint) => {
                     let mode = if args.read_only { Mode::Ro } else { Mode::Rw };
-                    let mounted = live.mount(mountpoint, mode)?;
+                    let mounted = live.mount(mountpoint, mode).wrap_err_with(|| {
+                        format!("mounting device {} at {}", args.name, mountpoint.display())
+                    })?;
                     if let Some(subdir) = &args.subdir {
                         // Created through the sandboxed handle, then dropped so
                         // it cannot hold the mount busy after we exit.
@@ -331,7 +422,8 @@ fn device(cmd: &DeviceCommand, json: bool) -> Result<()> {
                 .map(|m| obd::cleanup::unmount_path(m))
                 .unwrap_or(false);
             // Targeted teardown, not a sweep: only this device goes away.
-            obd::device::teardown_named(&args.name, &args.naa_suffix)?;
+            obd::device::teardown_named(&args.name, &args.naa_suffix)
+                .wrap_err_with(|| format!("tearing down device {}", args.name))?;
 
             if json {
                 println!(
@@ -353,8 +445,9 @@ fn device(cmd: &DeviceCommand, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cleanup(args: &CleanupArgs, json: bool) -> Result<()> {
-    let swept = obd::force_cleanup(&args.mounts)?;
+#[instrument(level = "info", skip_all, name = "obdctl::cleanup")]
+fn cleanup(args: &CleanupArgs, json: bool) -> color_eyre::Result<()> {
+    let swept = obd::force_cleanup(&args.mounts).wrap_err("sweeping leftover overlaybd devices")?;
     if json {
         println!("{}", serde_json::to_string_pretty(&swept)?);
     } else {

@@ -21,8 +21,42 @@ path = "src/lib.rs"
 cap-std = "4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The library returns typed errors and deliberately does not pick a report
+# handler; that is the binary's job (see color-eyre below).
 thiserror = "2"
-clap = { version = "4", features = ["derive"] }
+# Instrumentation only - no subscriber. Emitting is a no-op until a binary
+# installs one, so this costs nothing when disabled.
+tracing = "0.1"
+
+# Everything below is for the `obdctl` binary only, and is optional so a
+# library consumer does not inherit a report handler or a subscriber. Cargo has
+# no per-target dependency table within one package, so the `cli` feature plus
+# `required-features` on the binary is what keeps them apart.
+clap = { version = "4", features = ["derive"], optional = true }
+color-eyre = { version = "0.6", optional = true }
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "fmt",
+], optional = true }
+# Lets color-eyre attach the span trace to a report, so a failure shows which
+# device and which operation it happened under.
+tracing-error = { version = "0.2", optional = true }
+
+[features]
+default = ["cli"]
+# The obdctl binary. Turn it off (`--no-default-features`) to depend on the
+# library alone.
+cli = [
+    "dep:clap",
+    "dep:color-eyre",
+    "dep:tracing-subscriber",
+    "dep:tracing-error",
+]
+
+[[bin]]
+name = "obdctl"
+path = "src/bin/obdctl.rs"
+required-features = ["cli"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # mount(2)/umount2(2) directly rather than shelling out to mount(8): real
@@ -37,3 +71,5 @@ which = "8"
 
 [dev-dependencies]
 tempfile = "3"
+# Used by the test that pins config logging as non-secret-leaking.
+tracing-subscriber = { version = "0.3", features = ["fmt"] }

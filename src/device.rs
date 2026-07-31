@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use cap_std::fs::Dir;
+use tracing::{debug, info, instrument, trace, warn};
+// Only the Linux lifecycle has syscall edges worth an error event.
+#[cfg(target_os = "linux")]
+use tracing::error;
 
 use crate::config::DeviceConfig;
 use crate::configfs;
@@ -101,17 +105,26 @@ impl Device {
         )
     }
 
+    /// The backstore name, as it appears in configfs.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// The full `tcm_loop` nexus name, prefix included.
     pub fn naa(&self) -> &str {
         &self.naa
     }
 
     /// Launch the device and resolve its `/dev/sdX`.
     #[cfg(target_os = "linux")]
+    #[instrument(level = "debug", skip_all, fields(device = %self.name, naa = %self.naa))]
     pub fn up(self) -> Result<Live> {
+        let started = std::time::Instant::now();
+        debug!(
+            "launching {} from the device config {}",
+            self.name,
+            self.config_path.display()
+        );
         if let Some(parent) = self.result_path.parent() {
             std::fs::create_dir_all(parent).ctx(format!("creating {}", parent.display()))?;
         }
@@ -146,10 +159,20 @@ impl Device {
         // configfs write, so this must be checked explicitly.
         let result = configfs::await_result(&self.result_path, Duration::from_secs(10));
         if result != "success" {
+            // Non-recoverable, and the cause is in the daemon's log rather than
+            // in any errno we saw, so point at it explicitly.
+            error!(
+                device = %self.name,
+                result = %if result.is_empty() { "<empty>" } else { &result },
+                log = OVERLAYBD_LOG,
+                "overlaybd refused to launch the device; the daemon reports launch \
+                 failures through resultFile rather than through the configfs write"
+            );
             let mut live = Live {
                 device: self,
                 block_device: PathBuf::new(),
                 scsi_address: None,
+                armed: true,
             };
             let failure = Error::LaunchFailed {
                 device: live.device.name.clone(),
@@ -185,13 +208,28 @@ impl Device {
         let (block_device, address) =
             configfs::resolve_block_device(&self.name, &self.naa, Duration::from_secs(30))?;
 
+        trace!(
+            duration_ms = started.elapsed().as_millis() as u64,
+            "device-up"
+        );
+        // Auditable: a new block device now exists on this host.
+        info!(
+            device = %self.name,
+            block_device = %block_device.display(),
+            naa = %self.naa,
+            scsi_address = %address,
+            "launched an overlaybd device"
+        );
+
         Ok(Live {
             device: self,
             block_device,
             scsi_address: Some(address),
+            armed: true,
         })
     }
 
+    /// Always fails off Linux: there is no configfs to launch a device in.
     #[cfg(not(target_os = "linux"))]
     pub fn up(self) -> Result<Live> {
         Err(Error::unsupported())
@@ -204,6 +242,10 @@ pub struct Live {
     device: Device,
     block_device: PathBuf,
     scsi_address: Option<String>,
+    /// Cleared once teardown has run, or once ownership was handed off with
+    /// [`Live::persist`]. `Drop` checks it so an explicit `down()` is not
+    /// followed by a second teardown and a spurious warning.
+    armed: bool,
 }
 
 impl Live {
@@ -212,10 +254,12 @@ impl Live {
         &self.block_device
     }
 
+    /// The backstore name, as it appears in configfs.
     pub fn name(&self) -> &str {
         &self.device.name
     }
 
+    /// The full `tcm_loop` nexus name, prefix included.
     pub fn naa(&self) -> &str {
         &self.device.naa
     }
@@ -225,6 +269,7 @@ impl Live {
     /// Mount *before* handing the directory to anything that opens descriptors
     /// on it, and drop those descriptors before unmounting.
     #[cfg(target_os = "linux")]
+    #[instrument(level = "debug", skip_all, fields(device = %self.device.name, ?mode))]
     pub fn mount(self, mountpoint: impl Into<PathBuf>, mode: Mode) -> Result<Mounted> {
         use rustix::mount::{MountFlags, mount};
 
@@ -269,6 +314,7 @@ impl Live {
         })
     }
 
+    /// Always fails off Linux: `mount(2)` for ext4 is Linux-only here.
     #[cfg(not(target_os = "linux"))]
     pub fn mount(self, _mountpoint: impl Into<PathBuf>, _mode: Mode) -> Result<Mounted> {
         Err(Error::unsupported())
@@ -283,8 +329,10 @@ impl Live {
 
     /// Idempotent teardown, strictly in reverse creation order.
     fn teardown(&mut self) {
+        let started = std::time::Instant::now();
         let name = &self.device.name;
         let naa = &self.device.naa;
+        debug!("tearing down {name} in reverse creation order");
         configfs::rm_symlink(&configfs::lun_link_path(naa, name));
         configfs::rmdir(&configfs::lun0_path(naa));
         configfs::rmdir(&configfs::tpgt_path(naa));
@@ -299,13 +347,30 @@ impl Live {
         if let Some(address) = self.scsi_address.take() {
             configfs::wait_for_scsi_removal(&address, Duration::from_secs(15));
         }
+
+        self.armed = false;
+        trace!(
+            duration_ms = started.elapsed().as_millis() as u64,
+            "device-down"
+        );
+        // Auditable: the block device and its configfs entries are gone.
+        info!(
+            device = %self.device.name,
+            naa = %self.device.naa,
+            "tore down an overlaybd device"
+        );
     }
 
     /// Give up ownership without tearing down.
     ///
     /// Used by `obdctl device up`, which must leave the device running for a
     /// later process. Library callers normally want [`Live::down`] instead.
-    pub fn persist(self) -> PersistedDevice {
+    pub fn persist(mut self) -> PersistedDevice {
+        info!(
+            device = %self.device.name,
+            block_device = %self.block_device.display(),
+            "leaving the device running past this process; teardown is now the caller's job"
+        );
         let persisted = PersistedDevice {
             name: self.device.name.clone(),
             naa_suffix: self
@@ -317,15 +382,28 @@ impl Live {
             block_device: self.block_device.clone(),
             mountpoint: None,
         };
-        std::mem::forget(self);
+        // Disarm rather than `mem::forget`: forgetting would leak the owned
+        // name, nexus and path, and `Drop` still needs to run to release them.
+        self.armed = false;
         persisted
     }
 }
 
 impl Drop for Live {
     fn drop(&mut self) {
-        // RAII teardown: a dropped device must not leave configfs entries that
-        // need manual surgery. `persist()` opts out via mem::forget.
+        // `down()` and `persist()` both disarm, so reaching here still armed
+        // means the caller did neither - an error path unwinding, or a caller
+        // that forgot. Either way the device must not survive as a configfs
+        // entry needing manual surgery, but it is worth saying that the
+        // teardown happened at a point the caller did not choose.
+        if !self.armed {
+            return;
+        }
+        warn!(
+            device = %self.device.name,
+            "tearing down a device from Drop; call down() or persist() explicitly \
+             to control when this happens"
+        );
         self.teardown();
     }
 }
@@ -378,10 +456,12 @@ impl Mounted {
         &self.mountpoint
     }
 
+    /// The resolved `/dev/sdX` backing this mount.
     pub fn block_device(&self) -> &Path {
         self.live().block_device()
     }
 
+    /// The backstore name, as it appears in configfs.
     pub fn name(&self) -> &str {
         self.live().name()
     }
@@ -394,6 +474,7 @@ impl Mounted {
 
     /// sync, then unmount, returning the still-live device.
     #[cfg(target_os = "linux")]
+    #[instrument(level = "debug", skip_all, fields(mountpoint = %self.mountpoint.display()))]
     pub fn unmount(mut self) -> Result<Live> {
         use rustix::mount::{UnmountFlags, unmount};
 
@@ -401,10 +482,31 @@ impl Mounted {
         self.dir.take();
         rustix::fs::sync();
 
+        let started = std::time::Instant::now();
         let mut last: Option<std::io::Error> = None;
+        let mut attempts = 0u32;
+
         for _ in 0..20 {
+            attempts += 1;
             match unmount(&self.mountpoint, UnmountFlags::empty()) {
                 Ok(()) => {
+                    trace!(
+                        attempts,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "unmount"
+                    );
+                    if attempts > 1 {
+                        // The retry loop is defensive; it firing means someone
+                        // still held a descriptor when we were asked to unmount.
+                        warn!(
+                            mountpoint = %self.mountpoint.display(),
+                            attempts,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "unmounted only after retrying while the mount was busy"
+                        );
+                    }
+                    // Auditable: a filesystem is no longer visible.
+                    info!(mountpoint = %self.mountpoint.display(), "unmounted an overlaybd device");
                     // Take the Live out so our Drop has nothing left to do.
                     return Ok(self
                         .live
@@ -412,17 +514,29 @@ impl Mounted {
                         .expect("live is present for the lifetime of Mounted"));
                 }
                 Err(errno) => {
+                    trace!(attempts, errno = errno.raw_os_error(), "unmount-busy");
                     last = Some(std::io::Error::from_raw_os_error(errno.raw_os_error()));
                     std::thread::sleep(Duration::from_millis(500));
                 }
             }
         }
+
+        let err = last.unwrap_or_else(|| std::io::Error::other("unknown umount failure"));
+        // Non-recoverable here: the device cannot be torn down or committed
+        // while it is still mounted.
+        error!(
+            mountpoint = %self.mountpoint.display(),
+            attempts,
+            errno = err.raw_os_error().unwrap_or(-1),
+            "could not unmount; an open descriptor on the mount is the usual cause"
+        );
         Err(Error::Busy {
             path: self.mountpoint.clone(),
-            source: last.unwrap_or_else(|| std::io::Error::other("unknown umount failure")),
+            source: err,
         })
     }
 
+    /// Always fails off Linux, matching [`Live::mount`].
     #[cfg(not(target_os = "linux"))]
     pub fn unmount(self) -> Result<Live> {
         Err(Error::unsupported())
@@ -458,6 +572,11 @@ impl Drop for Mounted {
         // look redundant to clippy on those platforms even though removing it
         // silently unmounts persisted devices on Linux.
         if self.live.is_some() {
+            warn!(
+                mountpoint = %self.mountpoint.display(),
+                "unmounting from Drop; call unmount() or persist() explicitly to control \
+                 when this happens"
+            );
             #[cfg(target_os = "linux")]
             {
                 use rustix::mount::{UnmountFlags, unmount};
@@ -479,8 +598,13 @@ impl Drop for Mounted {
 /// teardown cannot rely on `Drop`. Everything it needs is derivable from the
 /// name and nexus suffix the caller already chose, which is why no state file
 /// is involved. Idempotent: removing a device that is already gone succeeds.
+#[instrument(level = "debug", skip_all, fields(device = %name))]
 pub fn teardown_named(name: &str, naa_suffix: &str) -> Result<()> {
     if !name.starts_with(configfs::DEV_PREFIX) {
+        debug!(
+            "refusing to tear down '{name}': the cleanup sweep only recognises names prefixed with '{}'",
+            configfs::DEV_PREFIX
+        );
         return Err(Error::BadDeviceName {
             name: name.to_string(),
             prefix: configfs::DEV_PREFIX,
@@ -506,6 +630,9 @@ pub fn teardown_named(name: &str, naa_suffix: &str) -> Result<()> {
     if let Some(address) = address {
         configfs::wait_for_scsi_removal(&address, Duration::from_secs(15));
     }
+
+    // Auditable, and the only teardown record when up/down span two processes.
+    info!(device = %name, naa = %naa, "tore down an overlaybd device by name");
     Ok(())
 }
 
@@ -516,9 +643,14 @@ pub fn teardown_named(name: &str, naa_suffix: &str) -> Result<()> {
 /// name and nexus suffix.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedDevice {
+    /// Backstore name, as passed to [`Device::new`]. Needed to tear it down.
     pub name: String,
+    /// Nexus suffix, as passed to [`Device::new`]. Needed to tear it down.
     pub naa_suffix: String,
+    /// The `/dev/sdX` that was resolved. Informational: it is recycled, so a
+    /// later process must resolve it again rather than trusting this value.
     pub block_device: PathBuf,
+    /// Where the device was mounted, when it was mounted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mountpoint: Option<PathBuf>,
 }

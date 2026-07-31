@@ -174,3 +174,59 @@ fn preflight_reports_the_platform() {
         .expect("checked");
     assert_eq!(linux.ok, cfg!(target_os = "linux"));
 }
+
+/// A caller-supplied `repoBlobUrl` can be pre-signed or carry a token, so the
+/// config must never be logged verbatim. This pins the behaviour rather than
+/// the wording: the URL itself must not be reachable from the rendered debug
+/// line, only from the file on disk.
+#[test]
+fn writing_a_config_does_not_log_the_repo_blob_url() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<String>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(buf));
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    const SECRET: &str = "https://reg.example/v2/x/blobs?sig=SUPERSECRETTOKEN";
+    let captured = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(captured.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("device.json");
+    tracing::subscriber::with_default(subscriber, || {
+        DeviceConfig::new("/r")
+            .lower(Lower::remote("sha256:abc", 10).unwrap())
+            .repo_blob_url(SECRET)
+            .write(&path)
+            .expect("writes");
+    });
+
+    let logged = captured.0.lock().unwrap().clone();
+    assert!(!logged.is_empty(), "expected the write to log something");
+    assert!(
+        !logged.contains("SUPERSECRETTOKEN"),
+        "the repoBlobUrl leaked into the logs:\n{logged}"
+    );
+    // It must still reach the file the daemon reads.
+    assert!(std::fs::read_to_string(&path).unwrap().contains(SECRET));
+}

@@ -50,3 +50,11 @@ Internal instruments, optimized for developer experience. We never ask a custome
 ## API Design
 
 All public APIs must have a doc-header. All public types must document each field.
+
+## Source Control Conventions
+
+Never push without explicit prior approval.
+
+Follow the Conventional Commits specification. Keep messages brief, preferably one sentence. Do not inventory the diff in the message — the diff is the inventory. State the intent or the most important aspect and let the commit itself do the rest of the work.
+
+Prefer rebase over merge to keep history linear when updating a branch from upstream. Rebase only your own feature branches; when a push is approved for a rebased branch, use `--force-with-lease`, never `--force`.

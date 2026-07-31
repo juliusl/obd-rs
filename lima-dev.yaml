@@ -1,0 +1,50 @@
+# Lima VM for testing obd-rs against a real overlaybd install.
+#
+#   limactl start --name=obd-dev --mount "$PWD" ./lima-dev.yaml
+#   limactl shell obd-dev
+#   sudo ./scripts/install-overlaybd.sh
+#   cargo test && sudo ./tests/lima-e2e.sh
+#
+# overlaybd itself is architecture independent, so this works on Apple Silicon:
+# unlike the hyperlight side of the original PoC, nothing here needs x86_64.
+minimumLimaVersion: 2.0.0
+
+vmType: "vz"
+
+images:
+- location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+  arch: "aarch64"
+- location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+  arch: "x86_64"
+
+cpus: 4
+memory: "8GiB"
+disk: "40GiB"
+
+mountType: "virtiofs"
+mounts:
+- location: "~"
+  writable: true
+
+containerd:
+  system: false
+  user: false
+
+provision:
+# target_core_user and tcm_loop are what turn an overlaybd config into /dev/sdX.
+# install-overlaybd.sh loads these too; doing it here means a freshly booted VM
+# is already ready.
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux
+    modprobe target_core_user
+    modprobe tcm_loop
+    printf 'target_core_user\ntcm_loop\n' > /etc/modules-load.d/overlaybd.conf
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq build-essential curl pkg-config

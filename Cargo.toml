@@ -1,0 +1,39 @@
+[workspace]
+# Single-member workspace: the root package is the only member, so the library
+# and the `src/bin/` binaries live together.
+members = []
+
+[package]
+name = "obd-rs"
+version = "0.1.0"
+edition = "2024"
+description = "overlaybd device lifecycle (TCMU + configfs) with cap-std sandboxed access to the mount"
+license = "Apache-2.0"
+
+[lib]
+# so downstream reads `use obd::Device`
+name = "obd"
+path = "src/lib.rs"
+
+[dependencies]
+# cap-std is the sandboxing primitive: every public API that hands back
+# filesystem access returns a cap_std Dir confined to the mount.
+cap-std = "4.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# mount(2)/umount2(2) directly rather than shelling out to mount(8): real
+# errnos instead of scraped stderr. cap-std already builds on rustix.
+rustix = { version = "1", features = ["mount", "fs", "process"] }
+# Cleanup on SIGINT/SIGTERM/SIGHUP runs on a listener thread, not in signal
+# context, so the configfs teardown need not be async-signal-safe.
+signal-hook = "0.3"
+
+[build-dependencies]
+which = "8"
+
+[dev-dependencies]
+tempfile = "3"

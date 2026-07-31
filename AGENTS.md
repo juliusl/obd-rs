@@ -9,6 +9,14 @@ Keep the epistemic state of the session (steering, feedback, mid-exploration unc
 - Bad: "We're not sure yet whether X handles Y."
 - Good: "X does not handle Y; see issue #123."
 
+References in docs must point to durable locations a future reader can reach — never to session-local or throwaway artifacts (prototypes, PoCs, superseded implementations). If a fact from a throwaway matters, restate it in self-contained form.
+
+Throwaways may contain salvage: data, generic test scripts, and reusable instruments with forward utility can be promoted into the repo on their own merits. Never preserve a throwaway wholesale, and never preserve anything solely to make a doc reference resolve.
+
+- Bad: "This is a port of `prototype.py` from the PoC, with two things the Python could not do:"
+- Also bad: committing `prototype.py` into the repo so the reference resolves.
+- Good: "Two constraints shaped this design that a Python implementation could not satisfy:" — with the prototype's test data promoted to `tests/fixtures/` because the tests use it.
+
 Keep technical writing brief and concise. When presenting data, use tables and let the reader draw conclusions rather than editorializing. Prefer mermaid charts over ASCII art.
 
 ## Debugging

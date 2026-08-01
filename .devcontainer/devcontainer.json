@@ -1,0 +1,71 @@
+// A devcontainer that can drive real overlaybd devices, not just build the
+// crate. That requires the container to share the Docker host's kernel closely
+// enough to load TCMU modules into it and see the device nodes it creates, so
+// the settings below are load-bearing rather than conventional.
+//
+// See README.md for what the host has to provide.
+{
+  "name": "obd-rs",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "features": {
+    // The default profile carries clippy and rustfmt; the crate is edition
+    // 2024, so the toolchain has to be at least 1.85.
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "latest",
+      "profile": "default"
+    }
+  },
+  // configfs writes, mount(2) and modprobe are ambient, whole-host operations.
+  // No capability set short of privileged covers them.
+  "privileged": true,
+  // A daemon killed inside the container is reaped by this init instead of
+  // accumulating as a zombie under a PID 1 that does not wait().
+  "init": true,
+  "mounts": [
+    // The container's /dev is a tmpfs populated once at creation, so a /dev/sdX
+    // that tcm_loop creates later never appears in it. Binding the host's
+    // devtmpfs is what lets the crate resolve a block device, and what gives
+    // overlaybd-tcmu the /dev/uioN it attaches to.
+    "source=/dev,target=/dev,type=bind",
+    // modprobe loads from the running kernel's module tree, which belongs to
+    // the Docker host.
+    "source=/lib/modules,target=/lib/modules,type=bind,readonly",
+    // Keep Linux build artifacts out of the bind-mounted workspace: they would
+    // collide with a host build sharing ./target, and cargo is markedly slower
+    // writing across the file-sharing layer.
+    "source=obd-rs-target,target=${containerWorkspaceFolder}/target,type=volume",
+    "source=obd-rs-cargo-registry,target=/usr/local/cargo/registry,type=volume"
+  ],
+  // A fixed name so anything outside VS Code - an agent session, a script -
+  // can reach the container with `docker exec obd-rs-dev` instead of first
+  // resolving it from the devcontainer.local_folder label.
+  "runArgs": ["--name", "obd-rs-dev"],
+  // Runs on create and on every subsequent start: modules, the configfs mount
+  // and the daemon are all per-boot state that no init system restores here.
+  "postStartCommand": ".devcontainer/provision.sh",
+  // Every operation this crate exists for needs root, and mixing `sudo cargo`
+  // with an unprivileged build leaves root-owned artifacts in the target
+  // directory. The container is already privileged, so an unprivileged user
+  // would be a costume rather than a boundary.
+  "remoteUser": "root",
+  "containerEnv": {
+    // Traces are off unless asked for; see the diagnostics table in README.md.
+    "RUST_LOG": "info"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb",
+        "timonwong.shellcheck"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}

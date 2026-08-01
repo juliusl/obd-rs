@@ -187,6 +187,7 @@ choosing a report handler belongs to the binary.
 | `tests/linux_device.rs` | Library device lifecycle; Linux and root |
 | `tests/lima-e2e.sh` | `obdctl` device lifecycle; Linux and root |
 | `lima-dev.yaml` | Lima VM for developing from macOS |
+| `.devcontainer/` | Devcontainer for developing in a container instead of a VM |
 
 ## Installation
 
@@ -199,7 +200,8 @@ install fails with `status=203/EXEC`.
 `scripts/install-overlaybd.sh` reconciles that: it symlinks the binaries into
 `/opt/overlaybd/bin`, seeds the two config files, and fetches the baselayer from
 the overlaybd source tree, where it is a checked-in artifact rather than a build
-output.
+output. It starts `overlaybd-tcmu` through systemd where there is an init
+system and directly where there is not, so it works unchanged in a container.
 
 `build.rs` only warns when those binaries are absent. The build host and the run
 host need not be the same machine, so a hard failure would break `cargo check`,
@@ -226,6 +228,32 @@ cargo build && sudo ./tests/lima-e2e.sh
 ```
 
 overlaybd is architecture independent, so the Lima VM works on Apple Silicon.
+
+A devcontainer runs the same suites in a container instead of a VM. Open the
+folder in VS Code and *Reopen in Container*, or drive it from the CLI:
+
+```bash
+devcontainer up --workspace-folder .   # create or start, then provision
+docker exec obd-rs-dev ./tests/lima-e2e.sh
+```
+
+Reopening the folder in VS Code arranges the same container, named the same way.
+A bare `docker start` does not: it skips `postStartCommand`, leaving the
+container with no configfs mount and no daemon, and `obdctl preflight` failing.
+Running `.devcontainer/provision.sh` restores that in about two seconds, and is
+idempotent, so it is the safe first move whoever started the container.
+
+Devices are driven through the Docker host's kernel — `modprobe` loads into it,
+and its udev creates the `/dev/sdX` — so that kernel needs `TARGET_CORE_USER`
+and `LOOPBACK_TARGET`, and the container is privileged with the host's `/dev`
+and `/lib/modules` bound in. A Linux host qualifies, as does colima on macOS,
+whose Ubuntu kernel ships both as modules. Where they are absent the container
+still builds and runs `cargo test`, `.devcontainer/provision.sh` names what is
+missing at every start, and `obdctl preflight` remains the authoritative check.
+Device state lives in the host kernel and outlives the container, so an
+interrupted run is swept with `obdctl cleanup`. That kernel is shared with every
+other container on the host, which is also why two device suites cannot run
+concurrently, in one container or several.
 
 The two device suites are not redundant. `tests/lima-e2e.sh` drives `obdctl`,
 which always hands devices off with `persist`; `tests/linux_device.rs` drives

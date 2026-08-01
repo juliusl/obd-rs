@@ -22,10 +22,25 @@ OVERLAYBD_BASELAYER="${OVERLAYBD_BASELAYER:-/opt/overlaybd/baselayers/ext4_64}"
 # build output, so it is fetched from a tag rather than a release asset.
 OVERLAYBD_BASELAYER_REF="${OVERLAYBD_BASELAYER_REF:-v1.0.18}"
 OVERLAYBD_BASELAYER_URL="${OVERLAYBD_BASELAYER_URL:-https://raw.githubusercontent.com/containerd/overlaybd/${OVERLAYBD_BASELAYER_REF}/baselayers/ext4_64.tar.gz}"
+# Where the daemon's stdio goes when there is no init system to capture it. Its
+# own log is /var/log/overlaybd.log; this catches what dies before that opens.
+OVERLAYBD_TCMU_LOG="${OVERLAYBD_TCMU_LOG:-/var/log/overlaybd-tcmu.out}"
 
 log() { printf '\n==> %s\n' "$1"; }
 info() { printf '    %s\n' "$1"; }
 die() { printf '\nERROR: %s\n' "$1" >&2; exit 1; }
+
+# True when a live daemon is present. pgrep alone is not enough: a daemon that
+# died where nothing reaps it - a container whose PID 1 is not an init - stays
+# visible under its own name as a zombie, and pgrep matches it. ps reports
+# those with state Z (ps(1), procps-ng 4.0.4, PROCESS STATE CODES).
+daemon_running() {
+  local pid
+  for pid in $(pgrep -x overlaybd-tcmu 2>/dev/null); do
+    [[ "$(ps -o stat= -p "$pid" 2>/dev/null)" == Z* ]] || return 0
+  done
+  return 1
+}
 
 [[ "$(id -u)" -eq 0 ]] || die "must run as root: sudo $0"
 [[ "$(uname -s)" == "Linux" ]] || die "overlaybd needs Linux (configfs + target_core_user)"
@@ -230,11 +245,37 @@ start_daemon() {
     systemctl is-active --quiet overlaybd-tcmu ||
       die "overlaybd-tcmu did not start; check 'journalctl -u overlaybd-tcmu' and /var/log/overlaybd.log"
     info "overlaybd-tcmu is active"
-  elif pgrep -x overlaybd-tcmu >/dev/null 2>&1; then
+  elif daemon_running; then
     info "overlaybd-tcmu is already running (no systemd here)"
   else
-    die "no systemd available; start the daemon yourself: $OVERLAYBD_BIN_DIR/overlaybd-tcmu &"
+    start_daemon_directly
   fi
+}
+
+# Run the daemon without an init system. A container is the case that matters:
+# the packaged unit file is present but nothing runs it, so the daemon is
+# launched directly and restarted by whatever starts the container.
+start_daemon_directly() {
+  local log="$OVERLAYBD_TCMU_LOG"
+  # setsid puts the daemon in its own session, so it outlives this script and
+  # the terminal that ran it; without it, a hangup on that terminal reaches the
+  # daemon (setsid(2), Linux man-pages 6.9).
+  setsid "$OVERLAYBD_BIN_DIR/overlaybd-tcmu" >>"$log" 2>&1 </dev/null &
+
+  # Startup failures - a missing /etc/overlaybd/overlaybd.json, a netlink
+  # interface the kernel refuses - surface as an immediate exit rather than an
+  # error on stderr, so liveness after a settling period is the signal.
+  local waited=0
+  while ! daemon_running; do
+    [[ "$waited" -lt 10 ]] ||
+      die "overlaybd-tcmu did not start; check $log and /var/log/overlaybd.log"
+    sleep 1
+    waited=$((waited + 1))
+  done
+  sleep 2
+  daemon_running ||
+    die "overlaybd-tcmu exited right after starting; check $log and /var/log/overlaybd.log"
+  info "started overlaybd-tcmu directly (no init system here), logging to $log"
 }
 
 log "installing overlaybd from PMC ($OVERLAYBD_PACKAGE_NAME)"

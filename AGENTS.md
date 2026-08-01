@@ -20,7 +20,7 @@ Throwaways may contain salvage: data, generic test scripts, and reusable instrum
 Comments earn their place where the code cannot speak for itself. Two sites require them:
 
 - **Error-log emission sites.** The log message is product: it carries verified facts only. The *why* is speculative — it needs a repro to confirm — so it lives in a comment at the emission site instead: enumerate the reasons this error can occur, cheapest-to-rule-out first. An investigator greps the message, lands here, and starts working backwards; the comment is their head start, and the simple cause checked first is often the answer.
-- **External behavior claims.** Any claim about a protocol, dependency behavior, or system behavior cites its source in the comment — RFC, manual, official docs. Uncited claims about external behavior are speculation; the citation is what makes them verifiable when versions drift.
+- **External behavior claims.** Any claim about a protocol, dependency behavior, or system behavior cites its source in the comment — RFC, manual, official docs. When the source is itself versioned software (kernel source, a dependency's code), pin the version or commit; a file path alone floats while the behavior drifts. Uncited claims about external behavior are speculation; the citation is what makes them verifiable when versions drift.
 
 Keep technical writing brief and concise. When presenting data, use tables and let the reader draw conclusions rather than editorializing. Prefer mermaid charts over ASCII art.
 

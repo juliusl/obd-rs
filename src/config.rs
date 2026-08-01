@@ -215,8 +215,6 @@ impl DeviceConfig {
         std::fs::write(path, &json)
             .map_err(|e| Error::io(format!("writing {}", path.display()), e))?;
 
-        // Auditable: this file tells the daemon which layer bytes to serve, so
-        // it is worth a durable record of what was written and where.
         info!(
             config = %path.display(),
             lowers = self.lowers.len(),

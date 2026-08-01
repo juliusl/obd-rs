@@ -90,6 +90,14 @@ pub(crate) fn run(command: &mut Command) -> Result<String> {
 
     let started = Instant::now();
     let output = command.output().map_err(|source| {
+        // Spawn failed, so the binary never ran. Reasons, cheapest first:
+        //   1. The file was found by `find` but is not executable, or lost its
+        //      +x bit: EACCES.
+        //   2. It is a dangling symlink - the install script links
+        //      /opt/overlaybd/bin -> /usr/bin/overlaybd, so an uninstall of the
+        //      package leaves the links behind: ENOENT.
+        //   3. The binary is for a different architecture: ENOEXEC.
+        //   4. The process is out of memory or hit RLIMIT_NPROC.
         error!("could not spawn {rendered}: {source}");
         Error::io(format!("could not run {rendered}"), source)
     })?;
@@ -106,8 +114,16 @@ pub(crate) fn run(command: &mut Command) -> Result<String> {
             .status
             .code()
             .map_or_else(|| "signal".to_string(), |c| c.to_string());
-        // The overlaybd binaries are the only place layer bytes are written,
-        // so a failure here is non-recoverable for the caller.
+        // The binary ran and rejected the work. Reasons, cheapest to rule out
+        // first, with the tool's own output in `combined`:
+        //   1. An output path already exists. Both tools open their outputs
+        //      O_EXCL, so a rerun over a previous run's directory fails here.
+        //   2. An input path is missing or unreadable, usually the data or
+        //      index of a layer that was never created.
+        //   3. The data file is still open by a live device, so a commit reads
+        //      a filesystem that is being written underneath it.
+        //   4. The filesystem holding the output is full, or the layer exceeds
+        //      a size limit the tool enforces.
         error!(command = %rendered, code, "overlaybd tool failed: {combined}");
         return Err(Error::ToolFailed {
             command: rendered,
@@ -124,8 +140,9 @@ pub(crate) fn run(command: &mut Command) -> Result<String> {
 /// append-only and tuned for image conversion, not for a runtime workload that
 /// creates and deletes files.
 ///
-/// `overlaybd-create` opens its outputs `O_EXCL|O_CREAT`, so both paths must
-/// not already exist; that is checked up front to give a clearer error.
+/// Both paths must not already exist: the tool opens its outputs with
+/// `O_RDWR | O_EXCL | O_CREAT` (overlaybd `src/tools/overlaybd-create.cpp`).
+/// Checking up front turns a terse tool error into a clear one.
 #[instrument(level = "debug", skip_all, fields(data = %data.display(), vsize_gb))]
 pub fn create_sparse_layer(data: &Path, index: &Path, vsize_gb: u32) -> Result<()> {
     for path in [data, index] {
@@ -151,7 +168,6 @@ pub fn create_sparse_layer(data: &Path, index: &Path, vsize_gb: u32) -> Result<(
         .arg(index)
         .arg(vsize_gb.to_string()))?;
 
-    // Auditable: this creates files that later become device backing store.
     info!(
         data = %data.display(),
         index = %index.display(),
@@ -163,9 +179,10 @@ pub fn create_sparse_layer(data: &Path, index: &Path, vsize_gb: u32) -> Result<(
 
 /// Turn a writable layer into a read-only overlaybd layer.
 ///
-/// The device must be **torn down** first: `overlaybd-commit` opens the data
-/// file `O_RDWR` and will happily run against a device the daemon still has
-/// open, capturing a torn filesystem.
+/// The device must be **torn down** first. `overlaybd-commit` opens the data
+/// file `O_RDWR` (overlaybd `src/tools/overlaybd-commit.cpp`) and does not
+/// check whether the daemon still has it open, so committing a live device
+/// captures a torn filesystem rather than failing.
 #[instrument(level = "debug", skip_all, fields(out = %out.display()))]
 pub fn commit_layer(data: &Path, index: &Path, out: &Path, message: &str) -> Result<u64> {
     if out.exists() {
@@ -194,7 +211,6 @@ pub fn commit_layer(data: &Path, index: &Path, out: &Path, message: &str) -> Res
         .map_err(|e| Error::io(format!("stat {}", out.display()), e))?
         .len();
 
-    // Auditable: produces the immutable artefact other hosts may consume.
     info!(
         layer = %out.display(),
         size_bytes = size,

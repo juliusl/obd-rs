@@ -57,7 +57,6 @@ pub fn unmount_path(target: &Path) -> bool {
     rustix::fs::sync();
     for attempt in 1..=20u32 {
         if unmount(target, UnmountFlags::empty()).is_ok() {
-            // Auditable: a filesystem is no longer visible on this host.
             info!(mountpoint = %target.display(), attempts = attempt, "unmounted during cleanup");
             return true;
         }
@@ -122,7 +121,6 @@ pub fn cleanup_all() -> Swept {
             configfs::rmdir(&lun0);
             configfs::rmdir(&configfs::tpgt_path(&naa));
             configfs::rmdir(&naa_dir);
-            // Auditable: removing host state that outlived its process.
             info!(nexus = %naa, "removed a stale tcm_loop nexus");
             swept.nexuses.push(naa);
         }

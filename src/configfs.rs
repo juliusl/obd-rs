@@ -60,10 +60,16 @@ pub fn lun_link_path(naa: &str, name: &str) -> PathBuf {
 
 /// Write a configfs attribute.
 ///
-/// configfs expects exactly one `write(2)` per value with no trailing newline,
-/// so this deliberately bypasses buffered IO. `enable` can return `EAGAIN`
-/// while the daemon is still attaching the device, which is what the retries
-/// are for.
+/// The value is written with a single `write(2)` and no trailing newline:
+/// "Configfs expects write(2) to store the entire buffer at once"
+/// (kernel `Documentation/filesystems/configfs.rst`, "Normal attributes"),
+/// which is why this bypasses buffered IO rather than using `fs::write`.
+///
+/// `retries` covers `EAGAIN`. Enabling a `target_core_user` backstore sends a
+/// netlink event to the userspace handler, and the kernel fails that with
+/// `-EAGAIN` while the interface is blocked - "Failing nl cmd %d on %s.
+/// Interface is blocked." in `drivers/target/target_core_user.c` - which is the
+/// window where the daemon has not finished attaching.
 pub fn write_attr(path: &Path, value: &str, retries: u32, delay: Duration) -> Result<()> {
     use std::io::Write;
 
@@ -115,8 +121,16 @@ pub fn write_attr(path: &Path, value: &str, retries: u32, delay: Duration) -> Re
     }
 
     let err = last.unwrap_or_else(|| std::io::Error::other("unknown configfs failure"));
-    // Syscall-adjacent edge: remediation is almost always outside this process
-    // (module not loaded, daemon dead, wrong path in the device config).
+    // Reasons this fires, cheapest to rule out first:
+    //   1. Not running as root. configfs rejects the open with EACCES.
+    //   2. `target_core_user` or `tcm_loop` is not loaded, so the attribute's
+    //      parent directory does not exist: ENOENT.
+    //   3. The overlaybd-tcmu daemon is not running, so nothing answers the
+    //      `enable` write and the EAGAIN retries are exhausted.
+    //   4. `dev_config` names a device config the daemon cannot open - wrong
+    //      path, or a layer file that is missing or unreadable. The daemon logs
+    //      the real cause to /var/log/overlaybd.log.
+    //   5. The device name is already in use by a live backstore: EEXIST.
     error!(
         attribute = %path.display(),
         value,
@@ -145,7 +159,9 @@ fn node_matches(node: &Path, devt: (u32, u32)) -> bool {
         return false;
     };
     let rdev = meta.rdev();
-    // Linux dev_t packing, as in makedev(3).
+    // Linux packs dev_t as 12 major bits at 8, 20 more at 32, and the minor in
+    // the gaps; see the glibc `makedev`/`major`/`minor` macros documented in
+    // makedev(3) and defined in <sys/sysmacros.h>.
     let major = ((rdev >> 8) & 0xfff) as u32 | ((rdev >> 32) & !0xfffu64) as u32;
     let minor = (rdev & 0xff) as u32 | ((rdev >> 12) & !0xffu64) as u32;
     (major, minor) == devt
@@ -158,9 +174,11 @@ fn node_matches(_node: &Path, _devt: (u32, u32)) -> bool {
 
 /// True once the node can actually be opened and read.
 ///
-/// `tcm_loop` recycles SCSI host:channel:target triples, so a node can exist
-/// with the right `dev_t` while the device behind it is still being set up (or
-/// torn down), which `mount` reports as "not a valid block device".
+/// A node can exist with the right `dev_t` while the device behind it is still
+/// being set up or torn down, which `mount` then reports as "not a valid block
+/// device". Reading a sector is the cheapest way to tell the difference.
+/// `tests/lima-e2e.sh` reruns a device back to back, which is the case that
+/// exposes this.
 fn node_readable(node: &Path) -> bool {
     use std::io::Read;
     let Ok(mut file) = std::fs::File::open(node) else {
@@ -173,11 +191,11 @@ fn node_readable(node: &Path) -> bool {
 /// Resolve `/dev/sdX` from the loopback nexus rather than guessing.
 ///
 /// `tcm_loop` publishes the SCSI `host:channel:target` triple in the tpgt's
-/// `address` attribute; LUN 0 is the one we linked. The node itself is created
-/// asynchronously by udev and SCSI names get recycled, so this waits until the
-/// node exists, its `dev_t` matches what sysfs reports, *and* it is readable.
-/// Without both waits, back-to-back runs intermittently fail with
-/// `mount: /dev/sdb is not a valid block device`.
+/// `address` attribute; LUN 0 is the one we linked. udev creates the node
+/// asynchronously, and the kernel reuses SCSI addresses once a device is gone,
+/// so this waits until the node exists, its `dev_t` matches what sysfs reports
+/// for *this* device, and it is readable. Without all three, back-to-back runs
+/// intermittently fail with `mount: /dev/sdb is not a valid block device`.
 #[instrument(level = "debug", skip_all, fields(device = %device, naa = %naa))]
 pub fn resolve_block_device(
     device: &str,
@@ -264,8 +282,16 @@ pub fn resolve_block_device(
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    // Non-recoverable: the caller cannot mount anything without a node, and
-    // the fix (udev, tcm_loop) is outside this process.
+    // Reasons this fires, cheapest to rule out first:
+    //   1. udev is not running, so nothing creates /dev nodes for new devices.
+    //      `last_seen` names the node sysfs expected; check whether it exists.
+    //   2. The device attached but the daemon is wedged, so every read of the
+    //      node fails and `not_ready` climbs for the whole timeout.
+    //   3. The SCSI address was recycled faster than teardown released it, so
+    //      `recycled` climbs: the node kept resolving to the previous device.
+    //   4. tcm_loop failed to create the LUN at all, in which case the sysfs
+    //      directory never appears and `last_seen` is <nothing>. dmesg carries
+    //      the kernel-side reason.
     error!(
         device,
         expected_at = %block_dir.display(),
@@ -287,11 +313,12 @@ pub fn resolve_block_device(
     })
 }
 
-/// Wait for the SCSI device to disappear before anyone reuses the triple.
+/// Wait for the SCSI device to disappear before anyone reuses the address.
 ///
-/// `tcm_loop` recycles `host:channel:target`, so returning while the old device
-/// is still being removed makes the *next* device resolve onto a node that is
-/// about to vanish.
+/// The kernel reuses `host:channel:target` once a device is gone, so returning
+/// while the old one is still being removed lets the *next* device resolve onto
+/// a node that is about to vanish. `tests/lima-e2e.sh` reruns a device back to
+/// back, which is the case that exposes this.
 pub fn wait_for_scsi_removal(address: &str, timeout: Duration) {
     let target = PathBuf::from(format!("/sys/class/scsi_device/{address}:0"));
     let started = Instant::now();
@@ -321,8 +348,10 @@ pub fn wait_for_scsi_removal(address: &str, timeout: Duration) {
 
 /// Read the daemon's `resultFile`, waiting for it to appear.
 ///
-/// overlaybd reports launch failures here rather than through the configfs
-/// write, so this has to be checked explicitly after `enable`.
+/// The configfs write succeeds even when the device fails to attach: overlaybd
+/// writes `success` or the failure reason to this file instead (overlaybd
+/// `src/image_service.cpp`, `set_result_file`), so it has to be checked
+/// explicitly after `enable`.
 pub fn await_result(result_file: &Path, timeout: Duration) -> String {
     let started = Instant::now();
     let deadline = started + timeout;

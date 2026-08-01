@@ -36,8 +36,9 @@ pub const OVERLAYBD_LOG: &str = "/var/log/overlaybd.log";
 pub enum Mode {
     /// Writable: the device must have an upper.
     Rw,
-    /// `ro,noload`. All of a lower-only device's layers are read-only, so ext4
-    /// cannot replay a journal; `noload` skips the attempt.
+    /// `ro,noload`. A lower-only device is read-only all the way down, so ext4
+    /// cannot replay a journal; `noload` means "Don't load the journal on
+    /// mounting" (kernel `Documentation/admin-guide/ext4.rst`).
     Ro,
 }
 
@@ -133,8 +134,9 @@ impl Device {
         let backstore = configfs::backstore_path(&self.name);
         std::fs::create_dir_all(&backstore).ctx(format!("creating {}", backstore.display()))?;
 
-        // The daemon registers the TCMU subtype "overlaybd"; everything after
-        // the first '/' is taken as the absolute config path.
+        // The daemon registers itself as TCMU subtype "overlaybd"
+        // (overlaybd `src/main.cpp`, `overlaybd_handler.subtype = "overlaybd"`),
+        // and everything after the first '/' is taken as the config path.
         let control = backstore.join("control");
         configfs::write_attr(
             &control,
@@ -155,12 +157,20 @@ impl Device {
             Duration::from_millis(50),
         )?;
 
-        // overlaybd reports launch failures through resultFile, not through the
-        // configfs write, so this must be checked explicitly.
         let result = configfs::await_result(&self.result_path, Duration::from_secs(10));
         if result != "success" {
-            // Non-recoverable, and the cause is in the daemon's log rather than
-            // in any errno we saw, so point at it explicitly.
+            // The daemon reports launch failures through resultFile rather
+            // than through the configfs write, so there is no errno to go on.
+            // Reasons, cheapest to rule out first:
+            //   1. A path in the device config does not exist or is not
+            //      readable by the daemon - most often the baselayer.
+            //   2. The upper layer files were created by a different
+            //      overlaybd version, or a commit left them truncated.
+            //   3. A remote lower is configured but repoBlobUrl is wrong or
+            //      the credentials in cred.json are missing or expired.
+            //   4. The daemon is out of file descriptors or cache space.
+            // An empty result means the daemon never wrote at all: it is
+            // wedged or was killed mid-attach.
             error!(
                 device = %self.name,
                 result = %if result.is_empty() { "<empty>" } else { &result },
@@ -212,7 +222,6 @@ impl Device {
             duration_ms = started.elapsed().as_millis() as u64,
             "device-up"
         );
-        // Auditable: a new block device now exists on this host.
         info!(
             device = %self.name,
             block_device = %block_device.display(),
@@ -276,8 +285,9 @@ impl Live {
         let mountpoint = mountpoint.into();
         std::fs::create_dir_all(&mountpoint).ctx(format!("creating {}", mountpoint.display()))?;
 
-        // ext4 cannot replay a journal on a device whose layers are all
-        // read-only, so `noload` skips the attempt.
+        // A device with no upper is read-only all the way down, so ext4 cannot
+        // replay its journal. `noload` skips the attempt: "Don't load the
+        // journal on mounting" (kernel `Documentation/admin-guide/ext4.rst`).
         let mut flags = MountFlags::empty();
         let data: Option<&std::ffi::CStr> = if mode.is_read_only() {
             flags |= MountFlags::RDONLY;
@@ -287,6 +297,25 @@ impl Live {
         };
 
         mount(&self.block_device, &mountpoint, "ext4", flags, data).map_err(|errno| {
+            // Reasons this fires, cheapest to rule out first:
+            //   1. Mode::Rw on a device with no upper. Every layer is
+            //      read-only, so ext4 refuses the mount with EROFS.
+            //   2. The mountpoint is not a directory, or already has something
+            //      mounted on it.
+            //   3. The layer was committed while its device was still mounted,
+            //      so the filesystem on it is torn: EINVAL, with ext4
+            //      complaining in dmesg.
+            //   4. The block device resolved but the daemon cannot serve it,
+            //      so reads fail and ext4 cannot find a superblock. The daemon
+            //      logs the reason to /var/log/overlaybd.log.
+            error!(
+                device = %self.device.name,
+                block_device = %self.block_device.display(),
+                mountpoint = %mountpoint.display(),
+                errno = errno.raw_os_error(),
+                read_only = mode.is_read_only(),
+                "mount(2) failed for the overlaybd device"
+            );
             Error::io(
                 format!(
                     "mounting {} at {} ({})",
@@ -353,7 +382,6 @@ impl Live {
             duration_ms = started.elapsed().as_millis() as u64,
             "device-down"
         );
-        // Auditable: the block device and its configfs entries are gone.
         info!(
             device = %self.device.name,
             naa = %self.device.naa,
@@ -505,7 +533,6 @@ impl Mounted {
                             "unmounted only after retrying while the mount was busy"
                         );
                     }
-                    // Auditable: a filesystem is no longer visible.
                     info!(mountpoint = %self.mountpoint.display(), "unmounted an overlaybd device");
                     // Take the Live out so our Drop has nothing left to do.
                     return Ok(self
@@ -522,8 +549,14 @@ impl Mounted {
         }
 
         let err = last.unwrap_or_else(|| std::io::Error::other("unknown umount failure"));
-        // Non-recoverable here: the device cannot be torn down or committed
-        // while it is still mounted.
+        // EBUSY means something still holds the mount. Reasons, cheapest to
+        // rule out first:
+        //   1. A `Dir` obtained from `dir()` or `create_subdir()` is still
+        //      alive somewhere - or a `File` opened through one.
+        //   2. A child process was spawned with its cwd inside the mount.
+        //   3. Something outside this process is in the mount: an interactive
+        //      shell, or a service that followed the path. `fuser -m` names it.
+        //   4. A nested mount was created underneath this one.
         error!(
             mountpoint = %self.mountpoint.display(),
             attempts,
@@ -631,7 +664,8 @@ pub fn teardown_named(name: &str, naa_suffix: &str) -> Result<()> {
         configfs::wait_for_scsi_removal(&address, Duration::from_secs(15));
     }
 
-    // Auditable, and the only teardown record when up/down span two processes.
+    // When up and down run in separate processes there is no Live to log from,
+    // so this is the only record that the device ever went away.
     info!(device = %name, naa = %naa, "tore down an overlaybd device by name");
     Ok(())
 }

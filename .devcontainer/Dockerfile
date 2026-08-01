@@ -7,7 +7,9 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 # kmod       - modprobe target_core_user and tcm_loop
 # procps     - the installer checks daemon liveness with pgrep and ps
 # curl, ca-certificates - the installer fetches the PMC repo and the baselayer
-# build-essential, pkg-config - cc for the Rust link step
+# build-essential, pkg-config - cc for the Rust link step, and make for the Makefile
+# shellcheck - `make lint` covers the shell scripts too, and there is no Docker
+#              inside this container to fall back on
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         kmod \
@@ -16,6 +18,7 @@ RUN apt-get update \
         ca-certificates \
         build-essential \
         pkg-config \
+        shellcheck \
     && rm -rf /var/lib/apt/lists/*
 
 # Where the devcontainer spec puts this workspace. Setting it here means a plain

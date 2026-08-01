@@ -188,6 +188,9 @@ choosing a report handler belongs to the binary.
 | `tests/lima-e2e.sh` | `obdctl` device lifecycle; Linux and root |
 | `lima-dev.yaml` | Lima VM for developing from macOS |
 | `.devcontainer/` | Devcontainer for developing in a container instead of a VM |
+| `Makefile` | Entry point for every routine task; `make help` lists them |
+| `tools/dev.sh` | Creates, repairs and enters the devcontainer |
+| `tools/shellcheck.sh` | Lints every shell script in the repository |
 
 ## Installation
 
@@ -216,9 +219,26 @@ the crate can be developed and unit-tested on macOS; device operations return
 
 ## Testing
 
-```bash
-cargo test                                  # anywhere, including macOS
+`make verify` is the whole bar: rustfmt, clippy, shellcheck, both feature sets,
+the API docs and every test suite.
 
+| Target | Covers |
+| --- | --- |
+| `make test` | The suites that need no device — anywhere, including macOS |
+| `make test-device` | `tests/linux_device.rs`, the library lifecycle |
+| `make test-e2e` | `tests/lima-e2e.sh`, the `obdctl` lifecycle |
+| `make preflight` | Whether this host can drive devices, and what is missing |
+| `make verify` | All of the above, plus lint and docs |
+
+Anything that touches a device needs a Linux kernel with TCMU and root, so
+those targets run in place on a Linux host and in the devcontainer everywhere
+else. `make help` reports which. `make verify` goes further off Linux and runs
+whole in the container: half this crate is behind `cfg(target_os = "linux")`,
+which clippy on a macOS host never sees.
+
+The commands underneath, for a Lima VM or any other Linux host:
+
+```bash
 limactl start --name=obd-dev --mount "$PWD" ./lima-dev.yaml
 limactl shell obd-dev
 sudo ./scripts/install-overlaybd.sh
@@ -230,18 +250,14 @@ cargo build && sudo ./tests/lima-e2e.sh
 overlaybd is architecture independent, so the Lima VM works on Apple Silicon.
 
 A devcontainer runs the same suites in a container instead of a VM. Open the
-folder in VS Code and *Reopen in Container*, or drive it from the CLI:
+folder in VS Code and *Reopen in Container*, or run `make dev` on any host with
+Docker. Both arrange the same container, named `obd-rs-dev`.
 
-```bash
-devcontainer up --workspace-folder .   # create or start, then provision
-docker exec obd-rs-dev ./tests/lima-e2e.sh
-```
-
-Reopening the folder in VS Code arranges the same container, named the same way.
 A bare `docker start` does not: it skips `postStartCommand`, leaving the
 container with no configfs mount and no daemon, and `obdctl preflight` failing.
-Running `.devcontainer/provision.sh` restores that in about two seconds, and is
-idempotent, so it is the safe first move whoever started the container.
+Every make target that enters the container detects that and re-runs
+`.devcontainer/provision.sh`, which repairs it in about two seconds and is
+idempotent.
 
 Devices are driven through the Docker host's kernel — `modprobe` loads into it,
 and its udev creates the `/dev/sdX` — so that kernel needs `TARGET_CORE_USER`
@@ -251,7 +267,7 @@ whose Ubuntu kernel ships both as modules. Where they are absent the container
 still builds and runs `cargo test`, `.devcontainer/provision.sh` names what is
 missing at every start, and `obdctl preflight` remains the authoritative check.
 Device state lives in the host kernel and outlives the container, so an
-interrupted run is swept with `obdctl cleanup`. That kernel is shared with every
+interrupted run is swept with `make cleanup`. That kernel is shared with every
 other container on the host, which is also why two device suites cannot run
 concurrently, in one container or several.
 

@@ -40,9 +40,9 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build check doc clean fmt lint test test-device test-e2e verify \
-        preflight cleanup install-overlaybd dev dev-shell dev-stop dev-rebuild \
-        dev-status
+.PHONY: help quickstart build check doc clean fmt lint test test-device \
+        test-e2e verify preflight cleanup install-overlaybd dev dev-shell \
+        dev-stop dev-rebuild dev-status
 
 ##@ General
 help: ## List these targets
@@ -53,6 +53,10 @@ help: ## List these targets
 		/^##@/ { printf "\n%s\n", substr($$0, 5); next } \
 		/^[a-zA-Z0-9_-]+:.*##/ { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@echo
+
+# .NOTPARALLEL above is what makes these prerequisites ordered: preflight is
+# only meaningful once the install has run.
+quickstart: install-overlaybd preflight ## Install overlaybd, build, and report whether this host can drive devices
 
 ##@ Build
 build: ## Compile the library and obdctl

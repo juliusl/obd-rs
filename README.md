@@ -35,10 +35,13 @@ stateDiagram-v2
 ## Quick start
 
 ```bash
-sudo ./scripts/install-overlaybd.sh   # install, /opt/overlaybd wiring, baselayer
-cargo build
-sudo ./target/debug/obdctl preflight
+make quickstart
 ```
+
+That installs overlaybd with its `/opt/overlaybd` wiring and baselayer, builds,
+and reports whether this host can drive devices. On Linux it runs in place and
+escalates with sudo where it must; anywhere else it runs in the devcontainer.
+`make help` names which.
 
 ```rust
 use obd::{Device, DeviceConfig, Lower, Mode, tools};

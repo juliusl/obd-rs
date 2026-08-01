@@ -62,14 +62,15 @@ pub fn lun_link_path(naa: &str, name: &str) -> PathBuf {
 ///
 /// The value is written with a single `write(2)` and no trailing newline:
 /// "Configfs expects write(2) to store the entire buffer at once"
-/// (kernel `Documentation/filesystems/configfs.rst`, "Normal attributes"),
-/// which is why this bypasses buffered IO rather than using `fs::write`.
+/// (Linux v6.8 `Documentation/filesystems/configfs.rst:64`), which is why this
+/// bypasses buffered IO rather than using `fs::write`.
 ///
 /// `retries` covers `EAGAIN`. Enabling a `target_core_user` backstore sends a
-/// netlink event to the userspace handler, and the kernel fails that with
+/// netlink event to the userspace handler, which the kernel fails with
 /// `-EAGAIN` while the interface is blocked - "Failing nl cmd %d on %s.
-/// Interface is blocked." in `drivers/target/target_core_user.c` - which is the
-/// window where the daemon has not finished attaching.
+/// Interface is blocked." (Linux v6.8
+/// `drivers/target/target_core_user.c:2017`) - and that is the window in which
+/// the daemon has not finished attaching.
 pub fn write_attr(path: &Path, value: &str, retries: u32, delay: Duration) -> Result<()> {
     use std::io::Write;
 
@@ -159,9 +160,12 @@ fn node_matches(node: &Path, devt: (u32, u32)) -> bool {
         return false;
     };
     let rdev = meta.rdev();
-    // Linux packs dev_t as 12 major bits at 8, 20 more at 32, and the minor in
-    // the gaps; see the glibc `makedev`/`major`/`minor` macros documented in
-    // makedev(3) and defined in <sys/sysmacros.h>.
+    // This is the glibc userspace dev_t encoding that stat(2) reports, which is
+    // *not* the kernel's internal MKDEV layout: major is 0x00000000000fff00 >> 8
+    // together with 0xfffff00000000000 >> 32, and minor is 0xff together with
+    // 0x00000ffffff00000 >> 12 (glibc 2.39 `bits/sysmacros.h:43` and `:55`,
+    // documented in makedev(3)). The `as u32` casts do the high-bit masking
+    // glibc spells out, so narrowing here is load-bearing rather than a lint.
     let major = ((rdev >> 8) & 0xfff) as u32 | ((rdev >> 32) & !0xfffu64) as u32;
     let minor = (rdev & 0xff) as u32 | ((rdev >> 12) & !0xffu64) as u32;
     (major, minor) == devt
@@ -350,8 +354,8 @@ pub fn wait_for_scsi_removal(address: &str, timeout: Duration) {
 ///
 /// The configfs write succeeds even when the device fails to attach: overlaybd
 /// writes `success` or the failure reason to this file instead (overlaybd
-/// `src/image_service.cpp`, `set_result_file`), so it has to be checked
-/// explicitly after `enable`.
+/// v1.0.18 `src/image_service.cpp:350`, `set_result_file`), so it has to be
+/// checked explicitly after `enable`.
 pub fn await_result(result_file: &Path, timeout: Duration) -> String {
     let started = Instant::now();
     let deadline = started + timeout;

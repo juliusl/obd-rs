@@ -141,8 +141,9 @@ pub(crate) fn run(command: &mut Command) -> Result<String> {
 /// creates and deletes files.
 ///
 /// Both paths must not already exist: the tool opens its outputs with
-/// `O_RDWR | O_EXCL | O_CREAT` (overlaybd `src/tools/overlaybd-create.cpp`).
-/// Checking up front turns a terse tool error into a clear one.
+/// `O_RDWR | O_EXCL | O_CREAT` (overlaybd v1.0.18
+/// `src/tools/overlaybd-create.cpp:79`). Checking up front turns a terse tool
+/// error into a clear one.
 #[instrument(level = "debug", skip_all, fields(data = %data.display(), vsize_gb))]
 pub fn create_sparse_layer(data: &Path, index: &Path, vsize_gb: u32) -> Result<()> {
     for path in [data, index] {
@@ -180,9 +181,9 @@ pub fn create_sparse_layer(data: &Path, index: &Path, vsize_gb: u32) -> Result<(
 /// Turn a writable layer into a read-only overlaybd layer.
 ///
 /// The device must be **torn down** first. `overlaybd-commit` opens the data
-/// file `O_RDWR` (overlaybd `src/tools/overlaybd-commit.cpp`) and does not
-/// check whether the daemon still has it open, so committing a live device
-/// captures a torn filesystem rather than failing.
+/// file `O_RDWR` (overlaybd v1.0.18 `src/tools/overlaybd-commit.cpp:108`) and
+/// does not check whether the daemon still has it open, so committing a live
+/// device captures a torn filesystem rather than failing.
 #[instrument(level = "debug", skip_all, fields(out = %out.display()))]
 pub fn commit_layer(data: &Path, index: &Path, out: &Path, message: &str) -> Result<u64> {
     if out.exists() {

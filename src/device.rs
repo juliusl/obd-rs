@@ -38,7 +38,7 @@ pub enum Mode {
     Rw,
     /// `ro,noload`. A lower-only device is read-only all the way down, so ext4
     /// cannot replay a journal; `noload` means "Don't load the journal on
-    /// mounting" (kernel `Documentation/admin-guide/ext4.rst`).
+    /// mounting" (Linux v6.8 `Documentation/admin-guide/ext4.rst:167`).
     Ro,
 }
 
@@ -134,9 +134,9 @@ impl Device {
         let backstore = configfs::backstore_path(&self.name);
         std::fs::create_dir_all(&backstore).ctx(format!("creating {}", backstore.display()))?;
 
-        // The daemon registers itself as TCMU subtype "overlaybd"
-        // (overlaybd `src/main.cpp`, `overlaybd_handler.subtype = "overlaybd"`),
-        // and everything after the first '/' is taken as the config path.
+        // The daemon registers itself as TCMU subtype "overlaybd" (overlaybd
+        // v1.0.18 `src/main.cpp:498`), and everything after the first '/' is
+        // taken as the config path.
         let control = backstore.join("control");
         configfs::write_attr(
             &control,
@@ -287,7 +287,8 @@ impl Live {
 
         // A device with no upper is read-only all the way down, so ext4 cannot
         // replay its journal. `noload` skips the attempt: "Don't load the
-        // journal on mounting" (kernel `Documentation/admin-guide/ext4.rst`).
+        // journal on mounting" (Linux v6.8
+        // `Documentation/admin-guide/ext4.rst:167`).
         let mut flags = MountFlags::empty();
         let data: Option<&std::ffi::CStr> = if mode.is_read_only() {
             flags |= MountFlags::RDONLY;

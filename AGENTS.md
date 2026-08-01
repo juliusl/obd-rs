@@ -60,6 +60,16 @@ Internal instruments, optimized for developer experience. We never ask a custome
 
 All public APIs must have a doc-header. All public types must document each field.
 
+## Make Interface
+
+`make` is the canonical interface for repo operations: build, test, lint, e2e, provision, clean. Ad-hoc command variants drift with the session — each subtly different invocation mutates repo behavior the way unpinned citations rot. A target pins the canonical form once. Targets delegate to scripts; make is the interface, not the implementation.
+
+Consume-first: before running a repo operation, check the Makefile; if a target exists, use it. If none exists, add the target and run it via `make` — the target is how the command is run the *first* time, not a cleanup afterward. This is the graduation rule for commands: ad-hoc invocations are throwaway prints; targets are the permanent form. Exploration is exempt — one-off diagnosis and inspection don't need targets; the rule governs operations that recur across sessions and CI.
+
+Tests are the strictest case. Varying the test invocation (filters, flags, features, thread counts) changes what "tests pass" means — results stop being comparable across sessions, and the evidence base drifts with the instrument. Filtered ad-hoc runs are fine while iterating, but they are debugging data, not verification: only the canonical target's run (`make test`, `make e2e`) counts as verification evidence, and Completion claims are backed by it alone.
+
+Environment-dependent targets (e2e above all) preflight their requirements and fail loudly naming what's missing — never silently succeed in a degraded mode.
+
 ## Source Control Conventions
 
 Never push without explicit prior approval.
@@ -105,6 +115,10 @@ Deferring a bug is the exception and carries a burden of proof: it needs a concr
 ### Lint
 
 The branch passes lint cleanly. Do not suppress warnings to get there; fix the cause or surface why it can't be fixed.
+
+### Make Targets
+
+Docs, README, and CI reference `make <target>`, never raw command sequences. A repo operation invoked more than once in the session exists as a target by PR time.
 
 ### Completion
 

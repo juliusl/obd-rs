@@ -18,9 +18,21 @@ IMAGE="koalaman/shellcheck:stable"
 cd "$REPO_ROOT"
 
 scripts=()
-while IFS= read -r script; do
-  scripts+=("$script")
-done < <(git ls-files --cached --others --exclude-standard '*.sh' | sort)
+while IFS= read -r file; do
+  case "$file" in
+  *.sh)
+    scripts+=("$file")
+    continue
+    ;;
+  esac
+  # Package maintainer scripts are named by the packaging format - lib/deb
+  # holds postinst and postrm - so extensions cannot find them and the shebang
+  # is what identifies them.
+  [ -r "$file" ] || continue
+  case "$(head -n 1 "$file" 2>/dev/null)" in
+  '#!'*sh) scripts+=("$file") ;;
+  esac
+done < <(git ls-files --cached --others --exclude-standard | sort)
 
 if [ "${#scripts[@]}" -eq 0 ]; then
   echo "shellcheck.sh: no shell scripts found under $REPO_ROOT" >&2

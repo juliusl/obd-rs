@@ -5,7 +5,8 @@
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
 # kmod       - modprobe target_core_user and tcm_loop
-# procps     - the installer checks daemon liveness with pgrep and ps
+# procps     - not needed by the install, which reads /proc directly; kept for
+#              looking at the daemon by hand from a shell in the container
 # curl, ca-certificates - the installer fetches the PMC repo and the baselayer
 # build-essential, pkg-config - cc for the Rust link step, and make for the Makefile
 # shellcheck - `make lint` covers the shell scripts too, and there is no Docker

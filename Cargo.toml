@@ -73,3 +73,86 @@ which = "8"
 tempfile = "3"
 # Used by the test that pins config logging as non-secret-leaking.
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+# System packages, built with `make package` (cargo-deb and cargo-generate-rpm).
+# They install obdctl and perform the reconciliation the PMC
+# containerd-overlaybd package leaves undone - see the Installation section of
+# README.md, which remains the description of what has to happen and why. The
+# assets below are the same files scripts/install-overlaybd.sh puts in place,
+# taken from lib/, so a host wired either way ends up identical.
+[package.metadata.deb]
+name = "obd-rs"
+maintainer = "obd-rs maintainers <noreply@github.com>"
+copyright = "2026 obd-rs authors"
+# containerd-overlaybd owns the binaries and the systemd unit; this package
+# owns everything that unit needs in order to start. It is published on
+# packages.microsoft.com, so that repository has to be configured first.
+depends = "$auto, containerd-overlaybd, kmod"
+section = "admin"
+priority = "optional"
+assets = [
+    ["target/release/obdctl", "usr/bin/", "755"],
+    # The daemon's own config, which the PMC package does not ship. A conffile:
+    # a host that edits it keeps its edits across upgrades.
+    ["lib/overlaybd/overlaybd.json", "etc/overlaybd/overlaybd.json", "644"],
+    # The fix for status=203/EXEC, applied declaratively rather than from the
+    # postinst, so the unit is correct before any script has run.
+    [
+        "lib/systemd/10-obd-rs.conf",
+        "usr/lib/systemd/system/overlaybd-tcmu.service.d/10-obd-rs.conf",
+        "644",
+    ],
+    ["lib/modules-load/overlaybd.conf", "usr/lib/modules-load.d/overlaybd.conf", "644"],
+    # The asset tree the maintainer scripts run from. Its layout mirrors lib/
+    # exactly, which is what lets obd-setup.sh locate its assets relative to
+    # itself whether it is running from the repository or from the package.
+    ["lib/shell/obd-setup.sh", "usr/share/obd-rs/shell/obd-setup.sh", "755"],
+    ["lib/shell/obd-baselayer.sh", "usr/share/obd-rs/shell/obd-baselayer.sh", "755"],
+    ["lib/overlaybd/overlaybd.json", "usr/share/obd-rs/overlaybd/overlaybd.json", "644"],
+    ["lib/overlaybd/cred.json", "usr/share/obd-rs/overlaybd/cred.json", "600"],
+    ["lib/systemd/10-obd-rs.conf", "usr/share/obd-rs/systemd/10-obd-rs.conf", "644"],
+    [
+        "lib/modules-load/overlaybd.conf",
+        "usr/share/obd-rs/modules-load/overlaybd.conf",
+        "644",
+    ],
+    ["README.md", "usr/share/doc/obd-rs/README.md", "644"],
+]
+conf-files = ["/etc/overlaybd/overlaybd.json"]
+maintainer-scripts = "lib/deb"
+# Puts the Apache-2.0 text into the generated usr/share/doc/obd-rs/copyright,
+# which is where dpkg-based systems expect to find a package's licence. 0 lines
+# skipped: the file is the licence and nothing else.
+license-file = ["LICENSE", "0"]
+extended-description = """\
+obdctl drives the overlaybd device lifecycle over TCMU and configfs: create \
+layers, launch a device, mount it, commit the result, tear it down. \
+Installing this package also completes the containerd-overlaybd install it \
+depends on: the daemon config it does not ship, an ext4 baselayer generated \
+locally, the kernel modules a device needs, and a drop-in correcting the \
+ExecStart of the shipped systemd unit."""
+
+[package.metadata.generate-rpm]
+# cargo-generate-rpm does not build or strip; tools/package.sh does both first.
+summary = "overlaybd device lifecycle CLI, and the host wiring overlaybd needs"
+assets = [
+    { source = "target/release/obdctl", dest = "/usr/bin/obdctl", mode = "755" },
+    { source = "lib/overlaybd/overlaybd.json", dest = "/etc/overlaybd/overlaybd.json", mode = "644", config = "noreplace" },
+    { source = "lib/systemd/10-obd-rs.conf", dest = "/usr/lib/systemd/system/overlaybd-tcmu.service.d/10-obd-rs.conf", mode = "644" },
+    { source = "lib/modules-load/overlaybd.conf", dest = "/usr/lib/modules-load.d/overlaybd.conf", mode = "644" },
+    { source = "lib/shell/obd-setup.sh", dest = "/usr/share/obd-rs/shell/obd-setup.sh", mode = "755" },
+    { source = "lib/shell/obd-baselayer.sh", dest = "/usr/share/obd-rs/shell/obd-baselayer.sh", mode = "755" },
+    { source = "lib/overlaybd/overlaybd.json", dest = "/usr/share/obd-rs/overlaybd/overlaybd.json", mode = "644" },
+    { source = "lib/overlaybd/cred.json", dest = "/usr/share/obd-rs/overlaybd/cred.json", mode = "600" },
+    { source = "lib/systemd/10-obd-rs.conf", dest = "/usr/share/obd-rs/systemd/10-obd-rs.conf", mode = "644" },
+    { source = "lib/modules-load/overlaybd.conf", dest = "/usr/share/obd-rs/modules-load/overlaybd.conf", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/obd-rs/README.md", mode = "644", doc = true },
+    # Where rpm-based systems keep a package's licence, and where
+    # containerd-overlaybd puts its own.
+    { source = "LICENSE", dest = "/usr/share/licenses/obd-rs/LICENSE", mode = "644", doc = true },
+]
+requires = { containerd-overlaybd = "*", kmod = "*" }
+post_install_script = "lib/rpm/post_install.sh"
+post_install_script_prog = ["/bin/bash"]
+post_uninstall_script = "lib/rpm/post_uninstall.sh"
+post_uninstall_script_prog = ["/bin/bash"]

@@ -199,6 +199,20 @@ pub fn preflight() -> Vec<Check> {
 
     #[cfg(target_os = "linux")]
     {
+        if daemon_running() {
+            checks.push(Check::pass("overlaybd-tcmu running"));
+        } else {
+            checks.push(Check::fail(
+                "overlaybd-tcmu running",
+                "sudo systemctl start overlaybd-tcmu, or run \
+                 /opt/overlaybd/bin/overlaybd-tcmu directly where there is no init system. \
+                 A daemon in another PID namespace is not visible from here",
+            ));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
         let root = rustix::process::geteuid().is_root();
         if root {
             checks.push(Check::pass("running as root"));
@@ -211,4 +225,67 @@ pub fn preflight() -> Vec<Check> {
     }
 
     checks
+}
+
+/// Whether a live `overlaybd-tcmu` is present in this PID namespace.
+///
+/// The daemon is what turns a configfs backstore into a device, and nothing
+/// else in the preflight covers it: every other check can pass on a host where
+/// `device up` still hangs waiting for a `resultFile` no one will write.
+///
+/// A dead daemon that nothing reaped - a container whose PID 1 does not
+/// `wait()` - keeps its `/proc/<pid>/comm` and would otherwise count as
+/// running, so zombies are excluded.
+#[cfg(target_os = "linux")]
+fn daemon_running() -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    entries.filter_map(std::result::Result::ok).any(|entry| {
+        let path = entry.path();
+        // comm is what the daemon appears as whether it was started by systemd
+        // or directly, and is the name `pgrep -x` matches.
+        match std::fs::read_to_string(path.join("comm")) {
+            Ok(comm) if comm.trim() == "overlaybd-tcmu" => {}
+            _ => return false,
+        }
+        // Racy by nature: the process can exit between the two reads, which
+        // reads as not running - the same answer a moment later would give.
+        match std::fs::read_to_string(path.join("stat")) {
+            Ok(stat) => proc_state(&stat) != Some('Z'),
+            Err(_) => false,
+        }
+    })
+}
+
+/// The state field of a `/proc/<pid>/stat` line.
+///
+/// The second field is the executable name in parentheses and may itself
+/// contain spaces and parentheses, so the state is found after the *last*
+/// `)` rather than by splitting on whitespace (proc_pid_stat(5), Linux
+/// man-pages 6.9).
+#[cfg(target_os = "linux")]
+fn proc_state(stat: &str) -> Option<char> {
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .next()?
+        .chars()
+        .next()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::proc_state;
+
+    #[test]
+    fn state_survives_a_comm_full_of_parentheses() {
+        assert_eq!(
+            proc_state("42 (overlaybd-tcmu) S 1 42 42 0 -1 4194560"),
+            Some('S')
+        );
+        assert_eq!(proc_state("7 (a (weird) name) Z 1 7 7 0 -1 0"), Some('Z'));
+        assert_eq!(proc_state("7 (x) R 1"), Some('R'));
+        assert_eq!(proc_state("truncated"), None);
+    }
 }

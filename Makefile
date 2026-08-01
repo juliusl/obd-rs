@@ -32,6 +32,14 @@ DEVICE_RUN := tools/dev.sh exec
 DEVICE_WHERE := in the $(CONTAINER) devcontainer, created on first use
 endif
 
+# Packaging needs Linux but not root: a .deb and a .rpm carry a Linux binary,
+# and neither cargo-deb nor cargo-generate-rpm cross-compiles one.
+ifeq ($(UNAME_S),Linux)
+LINUX_RUN :=
+else
+LINUX_RUN := tools/dev.sh exec
+endif
+
 # Device targets mutate global host state - configfs entries, kernel modules,
 # /dev/sdX - which is also why both device suites are single threaded. Two of
 # them at once would fight over the same nexus, so this makefile never runs in
@@ -41,7 +49,8 @@ endif
 .DEFAULT_GOAL := help
 
 .PHONY: help quickstart build check doc clean fmt lint test test-device \
-        test-e2e verify preflight cleanup install-overlaybd dev dev-shell \
+        test-e2e verify preflight cleanup install-overlaybd baselayer \
+        package package-deb package-rpm dev dev-shell \
         dev-stop dev-rebuild dev-status
 
 ##@ General
@@ -117,6 +126,19 @@ cleanup: ## Sweep the devices and mounts an interrupted run left behind
 
 install-overlaybd: ## Install overlaybd and start its daemon
 	$(DEVICE_RUN) ./scripts/install-overlaybd.sh
+
+baselayer: ## Generate the ext4 baselayer devices stack as their bottom lower
+	$(DEVICE_RUN) ./lib/shell/obd-baselayer.sh
+
+##@ Packaging
+package: ## Build the deb and the rpm into target/packages
+	$(LINUX_RUN) ./tools/package.sh all
+
+package-deb: ## Build only the deb
+	$(LINUX_RUN) ./tools/package.sh deb
+
+package-rpm: ## Build only the rpm
+	$(LINUX_RUN) ./tools/package.sh rpm
 
 ##@ Devcontainer
 dev: ## Create or start the container and provision it

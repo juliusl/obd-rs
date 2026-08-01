@@ -185,7 +185,11 @@ choosing a report handler belongs to the binary.
 | `src/cleanup.rs` | Convention sweep, signal handling |
 | `src/bin/obdctl.rs` | The CLI, the subscriber and the color-eyre setup |
 | `build.rs` | Build-time probe; warns only |
-| `scripts/install-overlaybd.sh` | Install and layout wiring |
+| `scripts/install-overlaybd.sh` | PMC repository and package install, then the wiring below |
+| `lib/shell/obd-setup.sh` | The host wiring itself; also run from the package's postinst |
+| `lib/shell/obd-baselayer.sh` | Generates the `ext4_64` baselayer |
+| `lib/overlaybd/`, `lib/systemd/`, `lib/modules-load/` | The files both delivery paths install |
+| `lib/deb/`, `lib/rpm/` | Maintainer scripts for the deb and the rpm |
 | `tests/api.rs` | Runs anywhere, including macOS |
 | `tests/linux_device.rs` | Library device lifecycle; Linux and root |
 | `tests/lima-e2e.sh` | `obdctl` device lifecycle; Linux and root |
@@ -193,6 +197,7 @@ choosing a report handler belongs to the binary.
 | `.devcontainer/` | Devcontainer for developing in a container instead of a VM |
 | `Makefile` | Entry point for every routine task; `make help` lists them |
 | `tools/dev.sh` | Creates, repairs and enters the devcontainer |
+| `tools/package.sh` | Builds the deb and the rpm |
 | `tools/shellcheck.sh` | Lints every shell script in the repository |
 
 ## Installation
@@ -203,16 +208,95 @@ under `/usr/bin/overlaybd` and ships nothing else: no
 systemd unit hardcodes `ExecStart=/opt/overlaybd/bin/overlaybd-tcmu`, so a stock
 install fails with `status=203/EXEC`.
 
-`scripts/install-overlaybd.sh` reconciles that: it symlinks the binaries into
-`/opt/overlaybd/bin`, seeds the two config files, and fetches the baselayer from
-the overlaybd source tree, where it is a checked-in artifact rather than a build
-output. It starts `overlaybd-tcmu` through systemd where there is an init
-system and directly where there is not, so it works unchanged in a container.
+`lib/shell/obd-setup.sh` reconciles that: it symlinks the binaries into
+`/opt/overlaybd/bin`, seeds the two config files, generates the baselayer, loads
+`target_core_user` and `tcm_loop`, and starts `overlaybd-tcmu` — through systemd
+where there is an init system and directly where there is not, so it works
+unchanged in a container. Two paths deliver it, and they leave a host in the
+same state because they run the same script over the same files:
+
+| Path | Covers | For |
+| --- | --- | --- |
+| `sudo ./scripts/install-overlaybd.sh` | The PMC repository and the `containerd-overlaybd` package, then `obd-setup.sh` | A machine with this checkout |
+| `make package`, then install `obd-rs_*.deb` or `obd-rs-*.rpm` | `obdctl`, the same files as package-managed content, then `obd-setup.sh` from the postinst | A machine without one |
 
 `build.rs` only warns when those binaries are absent. The build host and the run
 host need not be the same machine, so a hard failure would break `cargo check`,
 `clippy` and rust-analyzer on any machine without overlaybd installed.
 `obdctl preflight` is the authoritative check.
+
+### The baselayer
+
+Every device stacks an empty 64 GiB ext4 layer as its bottom lower. Upstream
+keeps it as `baselayers/ext4_64.tar.gz`, a checked-in artifact of its source
+tree rather than a release asset, so fetching it means reaching into a git tag
+over the network at install time.
+
+`lib/shell/obd-baselayer.sh` builds one instead, in two steps that need no
+device, no daemon and no network:
+
+1. `overlaybd-create --mkfs` writes an empty ext4 into a fresh writable layer.
+   The filesystem is built in-process with libext2fs against the layer file, so
+   no TCMU device and no loop device is involved.
+2. `overlaybd-commit -z` seals that into the read-only zfile layer a device
+   stacks as a lower.
+
+| | Upstream `ext4_64` | Generated |
+| --- | --- | --- |
+| Size | 4,737,695 bytes | 118,237 bytes |
+| Origin | Checked into the overlaybd source tree in 2021 | Built in 0.05s from the installed binaries |
+| Features | `has_journal`, `uninit_bg` | `sparse_super2`, no journal |
+| Inodes, blocks, block size | 4,194,304, 16,777,216, 4,096 | Identical |
+
+The journal is the difference: `make_extfs` never enables `has_journal`
+(PhotonLibOS `fs/extfs/mkfs.cpp:65-77`), so a generated baselayer is smaller,
+and a device that loses power with the mount dirty needs `fsck` rather than a
+replay. A lower-only device mounts `ro,noload` either way. `make baselayer`
+generates one, and `tests/lima-e2e.sh` passes against it: a writable device over
+the baselayer, a commit, and the committed layer restacked read-only.
+
+### The package
+
+`make package` builds both a `.deb` and an `.rpm` into `target/packages`, from
+`cargo-deb` and `cargo-generate-rpm` metadata in `Cargo.toml`. Packaging needs
+Linux, so off Linux the target dispatches into the devcontainer.
+
+| Installs | Path |
+| --- | --- |
+| `obdctl` | `/usr/bin/obdctl` |
+| The daemon config the PMC package omits | `/etc/overlaybd/overlaybd.json` (a conffile) |
+| The `ExecStart` correction, as a drop-in rather than a postinst edit | `/usr/lib/systemd/system/overlaybd-tcmu.service.d/10-obd-rs.conf` |
+| Both kernel modules, at boot | `/usr/lib/modules-load.d/overlaybd.conf` |
+| `obd-setup.sh`, `obd-baselayer.sh` and their assets | `/usr/share/obd-rs/` |
+
+The postinst runs `obd-setup.sh --daemon systemd`: it wires the layout, seeds
+`/opt/overlaybd/cred.json`, generates the baselayer, and starts the daemon
+through systemd when systemd is running. It never spawns a daemon itself — a
+package has to install cleanly in a chroot, in an image build and on a kernel
+without TCMU — so `obdctl preflight` remains the check that says whether the
+host can drive devices.
+
+The package depends on `containerd-overlaybd`, which lives on
+packages.microsoft.com, so that repository has to be configured first:
+
+```bash
+curl -fsSLO https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb
+sudo dpkg -i packages-microsoft-prod.deb && sudo apt-get update
+sudo apt-get install -y ./target/packages/obd-rs_*.deb
+obdctl preflight
+```
+
+Purging removes what it created: the `/opt/overlaybd` symlinks, which would
+otherwise dangle the moment `containerd-overlaybd` is removed, the generated
+baselayer, and `cred.json` if it is still the empty seed.
+
+Build each package on the distribution it targets. `obdctl` links glibc, and
+the rpm is the case that bites: built on Ubuntu 24.04 it is refused by Azure
+Linux 3.0 with `libc.so.6(GLIBC_2.39)(64bit) is needed by obd-rs`, because that
+release ships glibc 2.38. The wiring itself is portable — `containerd-overlaybd
+1.0.18-2.azl3` has the same layout as the Ubuntu build, binaries under
+`/usr/bin/overlaybd` and a unit pointing at `/opt/overlaybd/bin`, so the same
+drop-in corrects both.
 
 ## Platform
 

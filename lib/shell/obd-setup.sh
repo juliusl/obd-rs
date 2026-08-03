@@ -120,7 +120,7 @@ seed() {
 
 # Symlink the PMC binaries into /opt/overlaybd/bin, which is both what the
 # shipped systemd unit expects and what the rest of the overlaybd tooling
-# assumes. Mirrors the compat layer acr-mirror uses for these same packages.
+# assumes.
 wire_layout() {
   if [[ -d "$OVERLAYBD_PMC_BIN_DIR" ]]; then
     mkdir -p "$OVERLAYBD_BIN_DIR"

@@ -6,7 +6,7 @@
 #   cargo test && sudo ./tests/lima-e2e.sh
 #
 # overlaybd itself is architecture independent, so this works on Apple Silicon:
-# unlike the hyperlight side of the original PoC, nothing here needs x86_64.
+# nothing in this crate needs x86_64.
 minimumLimaVersion: 2.0.0
 
 vmType: "vz"

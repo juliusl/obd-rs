@@ -1,7 +1,7 @@
 //! `obdctl` - command-line access to the overlaybd device lifecycle.
 //!
-//! This is the CLI form of the `obd` library, intended to replace what
-//! `overlaybd_device.py` did for the PoC scripts.
+//! This is the CLI form of the `obd` library: the whole device lifecycle,
+//! reachable from a shell script or a job runner rather than from Rust.
 //!
 //! Commands are **stateless**: a device is identified by its name and nexus
 //! suffix, both of which the caller already chose, so `device up` in one

@@ -1,7 +1,7 @@
 //! Device lifecycle as a typestate: [`Device`] -> [`Live`] -> [`Mounted`].
 //!
-//! The ordering rules that the Python version could only document in comments
-//! are compile errors here:
+//! The ordering rules that a comment can only ask a caller to respect are
+//! compile errors here:
 //!
 //! * [`Mounted::dir`] hands out a **borrowed** [`Dir`], and [`Mounted::unmount`]
 //!   consumes `self`, so the borrow checker refuses to let you unmount while a

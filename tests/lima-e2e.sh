@@ -5,8 +5,8 @@
 #   sudo ./tests/lima-e2e.sh
 #
 # This is the part `cargo test` cannot cover: configfs, TCMU, mount(2) and the
-# overlaybd binaries. It drives everything through `obdctl`, which is also how
-# the PoC scripts are meant to consume this crate.
+# overlaybd binaries. It drives everything through `obdctl`, which is how a
+# caller outside Rust consumes this crate.
 set -euo pipefail
 
 OBDCTL="${OBDCTL:-$(dirname "$(dirname "$(readlink -f "$0")")")/target/debug/obdctl}"

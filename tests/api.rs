@@ -9,10 +9,10 @@ fn parse(config: &DeviceConfig) -> Value {
     serde_json::from_str(&config.to_json().expect("renders")).expect("valid json")
 }
 
-/// The shape `overlaybd_device.py::write_device_config` produced for a
-/// writable device: one local lower plus an upper, and no repoBlobUrl.
+/// The shape overlaybd expects for a writable device: one local lower plus an
+/// upper, and no repoBlobUrl.
 #[test]
-fn writable_device_config_matches_python() {
+fn writable_device_config_renders_a_lower_and_an_upper() {
     let config = DeviceConfig::new("/var/lib/poc/result-a")
         .lower(Lower::file("/opt/overlaybd/baselayers/ext4_64"))
         .upper("/var/lib/poc/upper.data", "/var/lib/poc/upper.index");
@@ -30,7 +30,8 @@ fn writable_device_config_matches_python() {
     );
 }
 
-/// A read-only device stacking a committed layer, as job 2 uses.
+/// A read-only device stacking a committed layer: every layer is a lower, so
+/// there is nothing to write through.
 #[test]
 fn readonly_device_config_has_no_upper() {
     let config = DeviceConfig::new("/var/lib/poc/result-b").lowers([

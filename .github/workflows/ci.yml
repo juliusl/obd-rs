@@ -1,0 +1,60 @@
+# Everything a branch has to pass that a hosted runner can actually run.
+#
+# `make verify` is the full bar, and it includes the two device suites. Those
+# need a kernel with TARGET_CORE_USER and LOOPBACK_TARGET, root, and a running
+# overlaybd-tcmu; a GitHub-hosted runner provides none of that reliably, so
+# they stay a local and self-hosted concern. What runs here is the device-free
+# half plus a packaging build, which is where breakage is otherwise found by a
+# release rather than by a pull request.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every step is a make target: the Makefile is the interface, so a check
+      # here and a check on a laptop cannot drift.
+      - name: Lint
+        run: make lint
+
+      - name: Type-check, both feature sets
+        run: make check
+
+      - name: API docs
+        run: make doc
+
+      - name: Tests that need no device
+        run: make test
+
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the deb and the rpm
+        run: make package
+        env:
+          OBD_PACKAGE_INSTALL_TOOLS: "1"
+
+      # Not a release, just evidence: the packages this commit produces are
+      # downloadable from the run that built them.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-x86_64
+          path: target/packages/*
+          if-no-files-found: error

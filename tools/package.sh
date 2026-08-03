@@ -35,6 +35,9 @@ esac
   die "packaging needs a Linux host or the devcontainer: run 'make package', which dispatches there"
 
 # Preflight the toolchain rather than failing halfway through a build.
+# OBD_PACKAGE_INSTALL_TOOLS=1 installs what is missing instead of refusing,
+# which is what CI wants: a hosted runner starts with neither, and the failure
+# message below is advice no automation can act on.
 missing=()
 if [[ "$WHAT" == "deb" || "$WHAT" == "all" ]]; then
   cargo deb --version >/dev/null 2>&1 || missing+=("cargo-deb")
@@ -43,8 +46,16 @@ if [[ "$WHAT" == "rpm" || "$WHAT" == "all" ]]; then
   cargo generate-rpm --version >/dev/null 2>&1 || missing+=("cargo-generate-rpm")
 fi
 if [[ "${#missing[@]}" -gt 0 ]]; then
-  die "missing packaging tools: ${missing[*]}
-       install them with: cargo install --locked ${missing[*]}"
+  if [[ "${OBD_PACKAGE_INSTALL_TOOLS:-0}" == "1" ]]; then
+    info "installing the packaging tools: ${missing[*]}"
+    # --locked so a build months from now resolves the dependency versions the
+    # tool was released with, rather than whatever is newest today.
+    cargo install --locked "${missing[@]}"
+  else
+    die "missing packaging tools: ${missing[*]}
+       install them with: cargo install --locked ${missing[*]}
+       or set OBD_PACKAGE_INSTALL_TOOLS=1 to have this script do it"
+  fi
 fi
 
 cd "$REPO_ROOT"

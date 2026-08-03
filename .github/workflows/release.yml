@@ -1,0 +1,152 @@
+# Build the packages on the distributions they target, and publish them.
+#
+# obdctl links glibc, so a package carries the glibc requirement of whatever
+# built it: an rpm built on Ubuntu 24.04 (glibc 2.39) is refused by Azure Linux
+# 3.0 (glibc 2.38) with `libc.so.6(GLIBC_2.39)(64bit) is needed by obd-rs`.
+# That is why the rpm is built inside an Azure Linux container rather than
+# alongside the deb, and why adding a distribution means adding a job rather
+# than a flag.
+#
+# Tagging vX.Y.Z publishes a release. Running it by hand builds the same
+# packages and leaves them as run artifacts, which is how to test a change to
+# this file without cutting a release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: deb (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      # The hosted Ubuntu images ship a Rust toolchain; only the packaging
+      # tools have to be added, which tools/package.sh does when asked.
+      - name: Build
+        run: make package-deb
+        env:
+          OBD_PACKAGE_INSTALL_TOOLS: "1"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: target/packages/*.deb
+          if-no-files-found: error
+
+  rpm:
+    name: rpm (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    container: mcr.microsoft.com/azurelinux/base/core:3.0
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      # Before checkout: the base image has no git, and actions/checkout falls
+      # back to a tarball download without it. The rest is what a Rust build
+      # needs and this image does not carry: glibc-devel for Scrt1.o and
+      # crti.o, without which every link step fails; kernel-headers for the
+      # linux/*.h that zstd-sys compiles against; binutils for strip, which
+      # tools/package.sh runs because cargo-generate-rpm does not.
+      - name: Install the build prerequisites
+        run: |
+          tdnf install -y \
+            ca-certificates git make gcc glibc-devel kernel-headers binutils tar
+
+      - uses: actions/checkout@v4
+
+      # No toolchain in this image, and no rustup either. --profile minimal
+      # skips the docs and rust-analyzer components a package build never uses.
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+
+      - name: Build
+        run: make package-rpm
+        env:
+          OBD_PACKAGE_INSTALL_TOOLS: "1"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ matrix.arch }}
+          path: target/packages/*.rpm
+          if-no-files-found: error
+
+  publish:
+    needs: [deb, rpm]
+    # workflow_dispatch runs the builds above and stops here: a release needs a
+    # tag to hang off.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The packages are named from Cargo.toml, not from the tag. A mismatch
+      # otherwise surfaces only when someone downloads obd-rs_0.1.0 from a
+      # release called v0.2.0.
+      - name: Check the tag against the crate version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(make version)"
+          if [ "$tag" != "$crate" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the Cargo.toml version $crate" >&2
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches Cargo.toml $crate"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum ./*.deb ./*.rpm >SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A hyphen in the version is a pre-release by SemVer, and GitHub has
+          # a flag for exactly that.
+          prerelease=""
+          case "$GITHUB_REF_NAME" in
+          *-*) prerelease="--prerelease" ;;
+          esac
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # Re-running a tag build replaces the assets rather than failing.
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag \
+              $prerelease \
+              dist/*
+          fi

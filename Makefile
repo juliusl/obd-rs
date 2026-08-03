@@ -50,7 +50,7 @@ endif
 
 .PHONY: help quickstart build check doc clean fmt lint test test-device \
         test-e2e verify preflight cleanup install-overlaybd baselayer \
-        package package-deb package-rpm dev dev-shell \
+        package package-deb package-rpm version dev dev-shell \
         dev-stop dev-rebuild dev-status
 
 ##@ General
@@ -139,6 +139,13 @@ package-deb: ## Build only the deb
 
 package-rpm: ## Build only the rpm
 	$(LINUX_RUN) ./tools/package.sh rpm
+
+# The release workflow checks the tag against this before it publishes: a
+# vX.Y.Z tag that does not match produces packages named after the manifest,
+# not after the tag, and the mismatch is only visible once someone downloads
+# one.
+version: ## Print the crate version, as the packages are named
+	@$(CARGO) pkgid | sed 's/.*[#@]//'
 
 ##@ Devcontainer
 dev: ## Create or start the container and provision it

@@ -196,6 +196,7 @@ choosing a report handler belongs to the binary.
 | `lima-dev.yaml` | Lima VM for developing from macOS |
 | `.devcontainer/` | Devcontainer for developing in a container instead of a VM |
 | `Makefile` | Entry point for every routine task; `make help` lists them |
+| `.github/workflows/` | CI on every push, and the tagged release build |
 | `tools/dev.sh` | Creates, repairs and enters the devcontainer |
 | `tools/package.sh` | Builds the deb and the rpm |
 | `tools/shellcheck.sh` | Lints every shell script in the repository |
@@ -297,6 +298,36 @@ release ships glibc 2.38. The wiring itself is portable — `containerd-overlayb
 1.0.18-2.azl3` has the same layout as the Ubuntu build, binaries under
 `/usr/bin/overlaybd` and a unit pointing at `/opt/overlaybd/bin`, so the same
 drop-in corrects both.
+
+### Releases
+
+Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which builds each
+package where it belongs and publishes them:
+
+| Job | Runs on | Produces |
+| --- | --- | --- |
+| `deb` | `ubuntu-24.04` and `ubuntu-24.04-arm` | `obd-rs_X.Y.Z-1_amd64.deb`, `..._arm64.deb` |
+| `rpm` | The same runners, inside `mcr.microsoft.com/azurelinux/base/core:3.0` | `obd-rs-X.Y.Z-1.x86_64.rpm`, `...aarch64.rpm` |
+| `publish` | `ubuntu-24.04` | The GitHub release, plus `SHA256SUMS` |
+
+Adding a distribution is a job rather than a flag, for the glibc reason above.
+The Azure Linux image carries neither a toolchain nor the headers a Rust build
+needs, so that job installs `gcc`, `glibc-devel`, `kernel-headers` and
+`binutils` before it starts; the hosted Ubuntu images already have everything
+but the packaging tools, which `OBD_PACKAGE_INSTALL_TOOLS=1` tells
+`tools/package.sh` to install rather than refuse over.
+
+Packages are named from `Cargo.toml`, not from the tag, so `publish` refuses a
+tag that disagrees with `make version` before it uploads anything. Running the
+workflow by hand builds the same packages and leaves them as run artifacts,
+which is how to test a change to it without cutting a release. The arm64 jobs
+use GitHub's arm runners, free on public repositories.
+
+Every push and pull request runs `.github/workflows/ci.yml`: `make lint`,
+`make check`, `make doc`, `make test`, and a packaging build. The two device
+suites are absent by necessity — they need a kernel with TCMU, root, and a
+running daemon, which a hosted runner does not provide — so `make verify`
+remains the bar a branch clears locally.
 
 ## Platform
 

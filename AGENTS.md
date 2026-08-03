@@ -94,7 +94,7 @@ You are accountable for delegated work: once merged, it is yours, and the PR ans
 
 ### Repository Layout
 
-Only these top-level directories exist; do not create new ones.
+No top-level directories outside this list. Creating a listed directory when first needed is expected — the list is the taxonomy, not a snapshot of what currently exists.
 
 - `src/` — product source (standard Cargo layout; tests inline and in `tests/`).
 - `docs/` — developer-facing documentation.

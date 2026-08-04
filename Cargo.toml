@@ -16,7 +16,7 @@ categories = ["os::linux-apis", "filesystem", "virtualization", "command-line-ut
 # The published crate is the library and its binary. The rest of the repository
 # is how this is developed, released and validated: none of it is actionable
 # from an unpacked tarball, and `repository` above is where it lives.
-exclude = [".devcontainer", ".github", "AGENTS.md", "lima-dev.yaml"]
+exclude = [".devcontainer", ".github", "AGENTS.md", "lima-dev.yaml", "docs/internal"]
 
 [lib]
 # so downstream reads `use obd::Device`

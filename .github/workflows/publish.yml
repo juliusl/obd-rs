@@ -12,7 +12,7 @@
 # to be published by hand before a trusted publisher can be configured for it
 # ("crates.io: development update", Rust Blog, 2025-07-11), so that first
 # publish is done from a laptop with a short-lived token that never reaches
-# GitHub at all. See "Publishing to crates.io" in README.md.
+# GitHub at all. See docs/internal/publish.md.
 #
 # The trigger is the tag rather than the GitHub release, because release.yml
 # creates that release with GITHUB_TOKEN, and events raised by GITHUB_TOKEN do

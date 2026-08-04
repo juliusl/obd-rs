@@ -197,6 +197,7 @@ choosing a report handler belongs to the binary.
 | `.devcontainer/` | Devcontainer for developing in a container instead of a VM |
 | `Makefile` | Entry point for every routine task; `make help` lists them |
 | `.github/workflows/` | CI on every push, and the tagged release build |
+| `docs/internal/` | Maintainer runbooks; publishing to crates.io lives here |
 | `tools/dev.sh` | Creates, repairs and enters the devcontainer |
 | `tools/package.sh` | Builds the deb and the rpm |
 | `tools/az-validate.sh` | Validates a published package on a fresh Azure VM |
@@ -359,43 +360,9 @@ publish-check`. The two device suites are absent by necessity — they need a
 kernel with TCMU, root, and a running daemon, which a hosted runner does not
 provide — so `make verify` remains the bar a branch clears locally.
 
-### Publishing to crates.io
-
-No crates.io token is stored in this repository. `.github/workflows/publish.yml`
-proves its identity over OIDC and receives a token that lasts for the run —
-crates.io calls this Trusted Publishing, and `rust-lang/crates-io-auth-action`
-revokes the token in its post step. The trade is configuration instead of a
-secret: crates.io has to be told which repository, workflow file and
-environment to trust.
-
-It cannot bootstrap itself. crates.io requires a crate's first release to be
-published by hand before a trusted publisher can be configured for it, so the
-one-time setup is:
-
-1. **Publish once from a laptop.** Mint a crates.io token scoped to
-   `publish-new`, run `cargo publish`, then revoke it. That token never reaches
-   GitHub, which is the point: nothing long-lived is stored anywhere.
-2. **On crates.io**, under the crate's Settings → Trusted Publishing, add this
-   repository, the workflow filename `publish.yml`, and the environment
-   `release`.
-3. **In this repository**, Settings → Environments → `release`. Add a required
-   reviewer there if publishing should pause for a human; publishing is
-   irreversible, since a version can be yanked but never replaced.
-
-After that, pushing a `vX.Y.Z` tag publishes the crate, alongside the packages
-`release.yml` builds from the same tag. Running the workflow by hand is the
-retry path.
-
-The tag is the trigger rather than the GitHub release, because `release.yml`
-creates that release with `GITHUB_TOKEN`, and events raised by `GITHUB_TOKEN`
-do not start another workflow run — so a release-triggered publish would never
-fire.
-
-Three things are checked before anything is uploaded: the tag agrees with the
-manifest version, that version is not already on crates.io, and `make
-publish-check` builds the crate from the packaged tree, so a file the tarball
-omits fails before a version number is spent rather than after. CI runs that
-last one on every pull request.
+Publishing the crate to crates.io is a maintainer operation with a one-time
+setup on the crates.io side; it lives in
+[docs/internal/publish.md](docs/internal/publish.md).
 
 ## Platform
 

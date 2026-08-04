@@ -358,8 +358,9 @@ use GitHub's arm runners, free on public repositories.
 
 A `vX.Y.Z-rcN` tag builds and publishes the same packages as a pre-release but
 never touches crates.io, which is how a packaging or CLI change gets installed
-from a real artifact before the version it rehearses becomes permanent. See
-[docs/internal/publish.md](docs/internal/publish.md).
+from a real artifact before the version it rehearses becomes permanent. The
+manifest carries the candidate version too, so its packages cannot be confused
+with the release's. See [docs/internal/publish.md](docs/internal/publish.md).
 
 Every push and pull request runs `.github/workflows/ci.yml`: `make lint`,
 `make check`, `make doc`, `make test`, a packaging build, and `make

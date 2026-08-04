@@ -54,7 +54,12 @@ git tag -a v0.2.0 -m "obd-rs 0.2.0" && git push origin v0.2.0
 That one tag drives both workflows: `release.yml` builds the packages and
 publishes the GitHub release, and `publish.yml` publishes the crate. Running
 `publish.yml` by hand from the Actions tab is the retry path when the upload
-fails but the tag is already out.
+fails but the tag is already out — dispatch it against the tag, not `main`, as
+the `release` environment only accepts `v*` refs.
+
+The publish run pauses at the `release` environment once its preflight has
+passed, so an approval is only ever requested for a release that is already
+known to be publishable.
 
 ### Why the tag, and not the release
 
@@ -65,6 +70,12 @@ workflow from a workflow"](https://docs.github.com/en/actions/how-tos/write-work
 A `release: published` trigger would therefore never fire, silently.
 
 ## What is checked before anything is uploaded
+
+These run in a `preflight` job that carries no environment, so they run
+unattended and fail in seconds. The publish job `needs` it. That ordering is
+the point: an environment gate holds a job *before* its first step, so putting
+the checks in the gated job would ask a reviewer to approve a release whose
+checks had not run yet.
 
 | Check | Catches |
 | --- | --- |

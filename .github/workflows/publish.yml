@@ -30,18 +30,13 @@ permissions:
   contents: read
 
 jobs:
-  crates-io:
+  # Everything that can say "no" cheaply, in a job with no environment on it.
+  # An environment gate holds a job *before* its first step, so a reviewer
+  # asked to approve the publish job would be approving a release whose checks
+  # had not run yet - and a missing changelog entry or a version already taken
+  # would only surface after they clicked. These run first and unattended.
+  preflight:
     runs-on: ubuntu-24.04
-    # Publishing is irreversible - a version can be yanked but never replaced -
-    # so this names an environment, which is where a required reviewer is added
-    # if this should pause for a human. crates.io matches it when the trusted
-    # publisher is configured with the same name.
-    environment: release
-    permissions:
-      # The OIDC token this exchanges for a crates.io one. Without it the auth
-      # step fails with a missing ID token request URL.
-      id-token: write
-      contents: read
     steps:
       - uses: actions/checkout@v7
 
@@ -83,6 +78,22 @@ jobs:
 
       - name: Package the crate exactly as it will be published
         run: make publish-check
+
+  crates-io:
+    needs: preflight
+    runs-on: ubuntu-24.04
+    # Publishing is irreversible - a version can be yanked but never replaced -
+    # so this names an environment, which is where a required reviewer is added
+    # if this should pause for a human. crates.io matches it when the trusted
+    # publisher is configured with the same name.
+    environment: release
+    permissions:
+      # The OIDC token this exchanges for a crates.io one. Without it the auth
+      # step fails with a missing ID token request URL.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Get a short-lived crates.io token
         id: auth

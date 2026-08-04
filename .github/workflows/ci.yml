@@ -41,6 +41,12 @@ jobs:
       - name: Tests that need no device
         run: make test
 
+      # The crate is published from a tag, by which point a packaging mistake
+      # costs a version number: crates.io versions can be yanked, never
+      # replaced. This is the same packaging step the publish workflow runs.
+      - name: Package the crate
+        run: make publish-check
+
   package:
     runs-on: ubuntu-24.04
     steps:

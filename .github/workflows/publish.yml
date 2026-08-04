@@ -1,0 +1,83 @@
+# Publish the crate to crates.io.
+#
+# No API token is stored in this repository. The job proves its identity to
+# crates.io over OIDC and gets a token that lasts for the run: crates.io calls
+# this Trusted Publishing, and the action's own post step revokes the token
+# when the job ends (rust-lang/crates-io-auth-action v1, README, "Sequence
+# Diagram"). What makes it work is configuration on the crates.io side - the
+# crate's Settings -> Trusted Publishing must name this repository, this
+# workflow's filename, and this environment.
+#
+# It cannot bootstrap itself. crates.io requires the first release of a crate
+# to be published by hand before a trusted publisher can be configured for it
+# ("crates.io: development update", Rust Blog, 2025-07-11), so that first
+# publish is done from a laptop with a short-lived token that never reaches
+# GitHub at all. See "Publishing to crates.io" in README.md.
+#
+# The trigger is the tag rather than the GitHub release, because release.yml
+# creates that release with GITHUB_TOKEN, and events raised by GITHUB_TOKEN do
+# not start another workflow run - workflow_dispatch being one of the two
+# documented exceptions (GitHub Actions docs, "Triggering a workflow from a
+# workflow"). A release-triggered publish would therefore simply never fire.
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  crates-io:
+    runs-on: ubuntu-24.04
+    # Publishing is irreversible - a version can be yanked but never replaced -
+    # so this names an environment, which is where a required reviewer is added
+    # if this should pause for a human. crates.io matches it when the trusted
+    # publisher is configured with the same name.
+    environment: release
+    permissions:
+      # The OIDC token this exchanges for a crates.io one. Without it the auth
+      # step fails with a missing ID token request URL.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # A tag that disagrees with the manifest would publish a version nobody
+      # can find from the release it came out of.
+      - name: Check the tag against the crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(make version)"
+          if [ "$tag" != "$crate" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the Cargo.toml version $crate" >&2
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches Cargo.toml $crate"
+
+      # crates.io rejects a duplicate version anyway; catching it here says so
+      # in one line instead of in a publish failure.
+      - name: Check the version is not already published
+        run: |
+          version="$(make version)"
+          if curl -fsS -H 'User-Agent: obd-rs-publish' \
+            "https://crates.io/api/v1/crates/obd-rs/$version" >/dev/null 2>&1; then
+            echo "obd-rs $version is already on crates.io; bump the version first" >&2
+            exit 1
+          fi
+          echo "obd-rs $version is not published yet"
+
+      - name: Package the crate exactly as it will be published
+        run: make publish-check
+
+      - name: Get a short-lived crates.io token
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

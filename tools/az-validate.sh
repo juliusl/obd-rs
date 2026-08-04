@@ -75,11 +75,16 @@ if [[ -z "$VERSION" ]]; then
   VERSION="v$(cd "$REPO_ROOT" && cargo pkgid | sed 's/.*[#@]//')"
 fi
 PLAIN_VERSION="${VERSION#v}"
+# A pre-release wears three spellings: 0.1.2-rc2 in the manifest, 0.1.2~rc2
+# inside the package because that is what sorts before 0.1.2, and 0.1.2+rc2 in
+# the asset name because GitHub rewrites '~' but not '+'. Only the last of the
+# three appears in a download URL.
+ASSET_VERSION="${PLAIN_VERSION//-/+}"
 
 case "$DISTRO" in
 azurelinux3)
   IMAGE="MicrosoftCBLMariner:azure-linux-3:azure-linux-3:latest"
-  ASSET="obd-rs-${PLAIN_VERSION}-${RELEASE}.x86_64.rpm"
+  ASSET="obd-rs-${ASSET_VERSION}-${RELEASE}.x86_64.rpm"
   # Azure Linux is published from packages.microsoft.com already, so
   # containerd-overlaybd resolves without adding a repository.
   ADD_REPO="true"
@@ -89,7 +94,7 @@ azurelinux3)
   ;;
 ubuntu24)
   IMAGE="Canonical:ubuntu-24_04-lts:server:latest"
-  ASSET="obd-rs_${PLAIN_VERSION}-${RELEASE}_amd64.deb"
+  ASSET="obd-rs_${ASSET_VERSION}-${RELEASE}_amd64.deb"
   ADD_REPO="curl -fsSLO https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb &&
     dpkg -i packages-microsoft-prod.deb && apt-get update -qq"
   INSTALL="DEBIAN_FRONTEND=noninteractive apt-get install -y"

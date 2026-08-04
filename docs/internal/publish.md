@@ -113,6 +113,17 @@ for the deb, and `~` sorts before the release in both. And the changelog check
 looks for the section of the release being rehearsed, so `0.1.2-rc1` is
 documented by `## [0.1.2]`.
 
+A candidate therefore wears three spellings, and each is load-bearing:
+
+| Where | Form | Why |
+| --- | --- | --- |
+| `Cargo.toml`, the git tag | `0.1.2-rc1` | SemVer, and what the tag check compares |
+| Inside the deb and the rpm | `0.1.2~rc1` | The only separator that sorts *before* `0.1.2` in either format; `+` or `.` would make the candidate look newer than the release |
+| The release asset's filename | `0.1.2+rc1` | GitHub rewrites `~` to `.` in asset names but leaves `+` alone, so `release.yml` renames before uploading and the name stays the one a download URL can be built from |
+
+The filename is cosmetic to `dpkg` and `rpm`, which read the version from the
+package's metadata, so the `~` that matters is untouched.
+
 ## What is checked before anything is uploaded
 
 These run in a `preflight` job that carries no environment, so they run

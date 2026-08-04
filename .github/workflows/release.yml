@@ -33,7 +33,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The hosted Ubuntu images ship a Rust toolchain; only the packaging
       # tools have to be added, which tools/package.sh does when asked.
@@ -42,7 +42,7 @@ jobs:
         env:
           OBD_PACKAGE_INSTALL_TOOLS: "1"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.arch }}
           path: target/packages/*.deb
@@ -67,12 +67,20 @@ jobs:
       # crti.o, without which every link step fails; kernel-headers for the
       # linux/*.h that zstd-sys compiles against; binutils for strip, which
       # tools/package.sh runs because cargo-generate-rpm does not.
+      #
+      # HOME is the load-bearing part. tdnf's repogpgcheck plugin reads the GPG
+      # keyring the image ships at /root/.gnupg, and resolves it through $HOME,
+      # which a container job has set to /github/home. Without this every
+      # repository fails its metadata signature check with "No public key" and
+      # is disabled, and the install ends in "No matching packages".
       - name: Install the build prerequisites
+        env:
+          HOME: /root
         run: |
           tdnf install -y \
             ca-certificates git make gcc glibc-devel kernel-headers binutils tar
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # No toolchain in this image, and no rustup either. --profile minimal
       # skips the docs and rust-analyzer components a package build never uses.
@@ -87,7 +95,7 @@ jobs:
         env:
           OBD_PACKAGE_INSTALL_TOOLS: "1"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rpm-${{ matrix.arch }}
           path: target/packages/*.rpm
@@ -102,7 +110,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The packages are named from Cargo.toml, not from the tag. A mismatch
       # otherwise surfaces only when someone downloads obd-rs_0.1.0 from a
@@ -117,7 +125,7 @@ jobs:
           fi
           echo "tag $GITHUB_REF_NAME matches Cargo.toml $crate"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

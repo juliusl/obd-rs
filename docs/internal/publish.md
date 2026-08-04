@@ -70,6 +70,7 @@ A `release: published` trigger would therefore never fire, silently.
 | --- | --- |
 | The tag matches the manifest version | A crate published under a version nobody can find from the release it came out of |
 | The version is absent from crates.io | A duplicate upload, reported in one line instead of a publish failure |
+| `CHANGELOG.md` has a section for the version | A permanent version arriving with nothing that says what it is |
 | `make publish-check` | A file the tarball omits — it builds the crate from the packaged tree, so this fails before a version number is spent |
 
 CI runs the last of those on every pull request, because by the time a tag

@@ -197,6 +197,7 @@ choosing a report handler belongs to the binary.
 | `lima-dev.yaml` | Lima VM for developing from macOS |
 | `.devcontainer/` | Devcontainer for developing in a container instead of a VM |
 | `Makefile` | Entry point for every routine task; `make help` lists them |
+| `CHANGELOG.md` | What changed in each released version |
 | `.github/workflows/` | CI on every push, and the tagged release build |
 | `docs/internal/` | Maintainer runbooks; publishing to crates.io lives here |
 | `tools/dev.sh` | Creates, repairs and enters the devcontainer |

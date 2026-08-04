@@ -5,7 +5,7 @@ members = []
 
 [package]
 name = "obd-rs"
-version = "0.1.2-rc3"
+version = "0.1.2"
 edition = "2024"
 description = "overlaybd device lifecycle (TCMU + configfs) with cap-std sandboxed access to the mount"
 license = "Apache-2.0"

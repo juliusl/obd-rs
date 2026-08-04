@@ -57,7 +57,7 @@ endif
 
 .PHONY: help quickstart build check doc clean fmt lint test test-device \
         test-e2e verify preflight cleanup install-overlaybd baselayer \
-        package package-deb package-rpm version validate-azure dev dev-shell \
+        package package-deb package-rpm publish-check version validate-azure dev dev-shell \
         dev-stop dev-rebuild dev-status
 
 ##@ General
@@ -146,6 +146,12 @@ package-deb: ## Build only the deb
 
 package-rpm: ## Build only the rpm
 	$(LINUX_RUN) ./tools/package.sh rpm
+
+# What `cargo publish` does before it uploads, and nothing more: it builds the
+# crate from the packaged tree, so a file left out of the tarball fails here
+# rather than after the version is taken.
+publish-check: ## Package the crate for crates.io without uploading it
+	$(CARGO) publish --locked --dry-run
 
 # The one thing this repository cannot check on the machine that builds it:
 # obdctl carries the glibc of its build host, the unit drop-in only means

@@ -198,6 +198,7 @@ choosing a report handler belongs to the binary.
 | `.devcontainer/` | Devcontainer for developing in a container instead of a VM |
 | `Makefile` | Entry point for every routine task; `make help` lists them |
 | `.github/workflows/` | CI on every push, and the tagged release build |
+| `docs/internal/` | Maintainer runbooks; publishing to crates.io lives here |
 | `tools/dev.sh` | Creates, repairs and enters the devcontainer |
 | `tools/package.sh` | Builds the deb and the rpm |
 | `tools/az-validate.sh` | Validates a published package on a fresh Azure VM |
@@ -355,10 +356,14 @@ which is how to test a change to it without cutting a release. The arm64 jobs
 use GitHub's arm runners, free on public repositories.
 
 Every push and pull request runs `.github/workflows/ci.yml`: `make lint`,
-`make check`, `make doc`, `make test`, and a packaging build. The two device
-suites are absent by necessity — they need a kernel with TCMU, root, and a
-running daemon, which a hosted runner does not provide — so `make verify`
-remains the bar a branch clears locally.
+`make check`, `make doc`, `make test`, a packaging build, and `make
+publish-check`. The two device suites are absent by necessity — they need a
+kernel with TCMU, root, and a running daemon, which a hosted runner does not
+provide — so `make verify` remains the bar a branch clears locally.
+
+Publishing the crate to crates.io is a maintainer operation with a one-time
+setup on the crates.io side; it lives in
+[docs/internal/publish.md](docs/internal/publish.md).
 
 ## Platform
 

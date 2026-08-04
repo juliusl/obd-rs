@@ -70,6 +70,17 @@ jobs:
           fi
           echo "obd-rs $version is not published yet"
 
+      # The version on crates.io is permanent, so it should arrive with a note
+      # saying what it is. This is the last moment that is still cheap.
+      - name: Check the changelog documents this version
+        run: |
+          version="$(make version)"
+          if ! grep -q "^## \[$version\]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## [$version]' section" >&2
+            exit 1
+          fi
+          echo "CHANGELOG.md documents $version"
+
       - name: Package the crate exactly as it will be published
         run: make publish-check
 

@@ -141,3 +141,31 @@ internal docs. None of it is actionable from an unpacked tarball, and
 The library, `obdctl`, `build.rs`, the packaging assets under `lib/`, the
 scripts the README refers to and the test suites all ship: 35 files, 74 KiB
 compressed at v0.1.0.
+
+## How the workflows are built
+
+`release.yml` builds each package on the distribution it targets, because
+`obdctl` links glibc and a package carries the glibc requirement of whatever
+built it. Adding a distribution is therefore a job rather than a flag.
+
+| Job | Runs on | Produces |
+| --- | --- | --- |
+| `deb` | `ubuntu-24.04` and `ubuntu-24.04-arm` | `obd-rs_X.Y.Z-1_amd64.deb`, `..._arm64.deb` |
+| `rpm` | The same runners, inside `mcr.microsoft.com/azurelinux/base/core:3.0` | `obd-rs-X.Y.Z-1.x86_64.rpm`, `...aarch64.rpm` |
+| `publish` | `ubuntu-24.04` | The GitHub release, plus `SHA256SUMS` |
+
+The Azure Linux image carries neither a toolchain nor the headers a Rust build
+needs, so that job installs `gcc`, `glibc-devel`, `kernel-headers` and
+`binutils` before it starts. The hosted Ubuntu images already have everything
+but the packaging tools, which `OBD_PACKAGE_INSTALL_TOOLS=1` tells
+`tools/package.sh` to install rather than refuse over. The arm64 jobs use
+GitHub's arm runners, free on public repositories.
+
+Running `release.yml` by hand builds the same packages and leaves them as run
+artifacts, which is how to test a change to it without cutting a release.
+
+`ci.yml` runs `make lint`, `make check`, `make doc`, `make test`, a packaging
+build and `make publish-check` on every push and pull request. The two device
+suites are absent by necessity — they need a kernel with TCMU, root and a
+running daemon, which a hosted runner does not provide — so `make verify`
+remains the bar a branch clears locally.

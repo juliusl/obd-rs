@@ -334,43 +334,22 @@ behind.
 
 ### Releases
 
-Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which builds each
-package where it belongs and publishes them:
+Every `vX.Y.Z` tag publishes a [GitHub release](https://github.com/juliusl/obd-rs/releases)
+carrying four packages and a `SHA256SUMS`, and the crate to
+[crates.io](https://crates.io/crates/obd-rs).
 
-| Job | Runs on | Produces |
+| Package | Built on | Installs on |
 | --- | --- | --- |
-| `deb` | `ubuntu-24.04` and `ubuntu-24.04-arm` | `obd-rs_X.Y.Z-1_amd64.deb`, `..._arm64.deb` |
-| `rpm` | The same runners, inside `mcr.microsoft.com/azurelinux/base/core:3.0` | `obd-rs-X.Y.Z-1.x86_64.rpm`, `...aarch64.rpm` |
-| `publish` | `ubuntu-24.04` | The GitHub release, plus `SHA256SUMS` |
+| `obd-rs_X.Y.Z-1_amd64.deb`, `..._arm64.deb` | Ubuntu 24.04 | Debian and Ubuntu, with the PMC repository configured |
+| `obd-rs-X.Y.Z-1.x86_64.rpm`, `...aarch64.rpm` | Azure Linux 3.0 | Azure Linux, and rpm distributions with glibc 2.38 or newer |
 
-Adding a distribution is a job rather than a flag, for the glibc reason above.
-The Azure Linux image carries neither a toolchain nor the headers a Rust build
-needs, so that job installs `gcc`, `glibc-devel`, `kernel-headers` and
-`binutils` before it starts; the hosted Ubuntu images already have everything
-but the packaging tools, which `OBD_PACKAGE_INSTALL_TOOLS=1` tells
-`tools/package.sh` to install rather than refuse over.
+Each is built on the distribution it targets, for the glibc reason above. A tag
+ending `-rcN` is a pre-release: the same packages, published so a change can be
+installed and driven before the version it rehearses becomes permanent, with no
+crates.io version spent on it.
 
-Packages are named from `Cargo.toml`, not from the tag, so `publish` refuses a
-tag that disagrees with `make version` before it uploads anything. Running the
-workflow by hand builds the same packages and leaves them as run artifacts,
-which is how to test a change to it without cutting a release. The arm64 jobs
-use GitHub's arm runners, free on public repositories.
-
-A `vX.Y.Z-rcN` tag builds and publishes the same packages as a pre-release but
-never touches crates.io, which is how a packaging or CLI change gets installed
-from a real artifact before the version it rehearses becomes permanent. The
-manifest carries the candidate version too, so its packages cannot be confused
-with the release's. See [docs/internal/publish.md](docs/internal/publish.md).
-
-Every push and pull request runs `.github/workflows/ci.yml`: `make lint`,
-`make check`, `make doc`, `make test`, a packaging build, and `make
-publish-check`. The two device suites are absent by necessity — they need a
-kernel with TCMU, root, and a running daemon, which a hosted runner does not
-provide — so `make verify` remains the bar a branch clears locally.
-
-Publishing the crate to crates.io is a maintainer operation with a one-time
-setup on the crates.io side; it lives in
-[docs/internal/publish.md](docs/internal/publish.md).
+How a release is cut, and the one-time crates.io setup behind it, is a
+maintainer runbook: [docs/internal/publish.md](docs/internal/publish.md).
 
 ## Platform
 
@@ -381,7 +360,9 @@ the crate can be developed and unit-tested on macOS; device operations return
 ## Testing
 
 `make verify` is the whole bar: rustfmt, clippy, shellcheck, both feature sets,
-the API docs and every test suite.
+the API docs and every test suite. CI runs everything in it that a hosted
+runner can — the two device suites need a kernel with TCMU, root and a running
+daemon, so those stay local.
 
 | Target | Covers |
 | --- | --- |

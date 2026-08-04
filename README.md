@@ -88,6 +88,7 @@ mount: `..` and absolute paths are refused.
 | `layer commit --data D --index I --out O --message M` | Commit a writable layer into a read-only one |
 | `config --out C --result-file R --lower L [--upper-data D --upper-index I]` | Write a device config |
 | `config ... --remote-lower sha256:abc=167936 --repo-blob-url URL` | Add a streamed lower |
+| `config ... --remote-lower-dir PATH` | Let overlaybd persist that lower's fetched blocks; pairs positionally |
 | `device up --name poc_a --config C --result-file R --naa-suffix 0021 [--mount P] [--read-only] [--subdir S]` | Launch, optionally mount, and leave running |
 | `device down --name poc_a --naa-suffix 0021 [--mount P]` | Unmount and tear down |
 | `cleanup [--mount A --mount B]` | Remove leftovers from an interrupted run |

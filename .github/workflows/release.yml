@@ -130,6 +130,22 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # A pre-release version carries '~' - 0.1.2~rc2 - and GitHub rewrites '~'
+      # to '.' in a release asset's name, so the file on the release is not the
+      # file the build produced and no constructed URL finds it. It leaves '+'
+      # alone (measured: uploading both, only the '~' name came back changed),
+      # so renaming to '+' here leaves nothing for it to rewrite. The package's
+      # own version keeps the '~', which is the only separator that sorts
+      # before 0.1.2 in either format.
+      - name: Give the assets names GitHub will not rewrite
+        run: |
+          cd dist
+          for asset in *'~'*; do
+            [ -e "$asset" ] || continue
+            mv "$asset" "${asset//\~/+}"
+          done
+          ls
+
       - name: Checksums
         run: |
           cd dist

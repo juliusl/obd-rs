@@ -37,8 +37,28 @@ jobs:
   # would only surface after they clicked. These run first and unattended.
   preflight:
     runs-on: ubuntu-24.04
+    outputs:
+      prerelease: ${{ steps.classify.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
+
+      # A SemVer pre-release - v0.1.2-rc1 - is a dress rehearsal: it builds and
+      # publishes the packages so they can be installed and driven on a real
+      # host, but it must never take a crates.io version, which is permanent.
+      - name: Classify the version
+        id: classify
+        run: |
+          version="$(make version)"
+          case "$version" in
+          *-*)
+            echo "prerelease=true" >>"$GITHUB_OUTPUT"
+            echo "$version is a pre-release; the crate will not be published"
+            ;;
+          *)
+            echo "prerelease=false" >>"$GITHUB_OUTPUT"
+            echo "$version is a release"
+            ;;
+          esac
 
       # A tag that disagrees with the manifest would publish a version nobody
       # can find from the release it came out of.
@@ -70,17 +90,23 @@ jobs:
       - name: Check the changelog documents this version
         run: |
           version="$(make version)"
-          if ! grep -q "^## \[$version\]" CHANGELOG.md; then
-            echo "CHANGELOG.md has no '## [$version]' section" >&2
+          # A pre-release is rehearsing the release it is named after, and that
+          # is the section the changelog carries: 0.1.2-rc1 -> 0.1.2.
+          documented="${version%%-*}"
+          if ! grep -q "^## \[$documented\]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## [$documented]' section" >&2
             exit 1
           fi
-          echo "CHANGELOG.md documents $version"
+          echo "CHANGELOG.md documents $documented"
 
       - name: Package the crate exactly as it will be published
         run: make publish-check
 
   crates-io:
     needs: preflight
+    # Pre-releases stop here: the packages are built and published for
+    # validation, and no permanent crates.io version is spent rehearsing.
+    if: needs.preflight.outputs.prerelease == 'false'
     runs-on: ubuntu-24.04
     # Publishing is irreversible - a version can be yanked but never replaced -
     # so this names an environment, which is where a required reviewer is added

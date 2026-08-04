@@ -9,6 +9,27 @@ rpm, publishes the GitHub release, and publishes the crate to crates.io.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-04
+
+### Changed
+
+- **Breaking.** The per-layer cache directory moved from a separate
+  `--remote-lower-dir` flag onto the lower it belongs to:
+  `--remote-lower sha256:...=SIZE=DIR`. The flag it replaces paired
+  positionally with `--remote-lower` and had to be given for every streamed
+  lower or none, so skipping one in the middle needed an empty value as a
+  sentinel — which clap rejected outright, making the documented escape hatch
+  impossible to type. Attaching the directory to its own layer removes the
+  pairing, the all-or-nothing rule and the sentinel together.
+  `--remote-lower sha256:...=SIZE` is unchanged.
+
+### Fixed
+
+- `--remote-lower-dir ""` failed with `a value is required for
+  '--remote-lower-dir <PATH>' but none was supplied`, so a config with two
+  streamed lowers could not cache only the second. The option no longer exists;
+  see above.
+
 ## [0.1.1] - 2026-08-04
 
 ### Added
@@ -52,6 +73,7 @@ before a trusted publisher can be configured.
 - `tracing` instrumentation with no subscriber installed, so it costs nothing
   until a binary opts in.
 
-[Unreleased]: https://github.com/juliusl/obd-rs/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/juliusl/obd-rs/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/juliusl/obd-rs/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/juliusl/obd-rs/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/juliusl/obd-rs/releases/tag/v0.1.0

@@ -69,6 +69,34 @@ one of the two documented exceptions ([GitHub Actions docs, "Triggering a
 workflow from a workflow"](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)).
 A `release: published` trigger would therefore never fire, silently.
 
+### Rehearsing a release
+
+A change to the packages or the CLI is only really proven once it is installed
+from a published artifact and driven on a real host. A SemVer pre-release tag
+does that without spending anything permanent:
+
+```bash
+git tag -a v0.1.2-rc1 -m "obd-rs 0.1.2-rc1" && git push origin v0.1.2-rc1
+```
+
+That builds all four packages, publishes a GitHub release marked pre-release,
+and **stops before crates.io** — `publish.yml` runs its preflight and skips the
+publish job, because a crates.io version can never be replaced and is not worth
+spending on a rehearsal. The artifacts are then real, downloadable packages:
+
+```bash
+make validate-azure DISTRO=azurelinux3 VERSION=v0.1.2-rc1
+OBD_RS_VERSION=v0.1.2-rc1 sudo ./setup.sh     # in the PoC checkout
+```
+
+Two details the formats force. An rpm version cannot contain `-`, so
+`tools/package.sh` names the rpm `0.1.2~rc1`; cargo-deb already does the same
+for the deb, and `~` sorts before the release in both. And the changelog check
+looks for the section of the release being rehearsed, so `0.1.2-rc1` is
+documented by `## [0.1.2]`.
+
+When the rehearsal passes, tag `v0.1.2` and the crate publishes.
+
 ## What is checked before anything is uploaded
 
 These run in a `preflight` job that carries no environment, so they run

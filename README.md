@@ -88,7 +88,7 @@ mount: `..` and absolute paths are refused.
 | `layer commit --data D --index I --out O --message M` | Commit a writable layer into a read-only one |
 | `config --out C --result-file R --lower L [--upper-data D --upper-index I]` | Write a device config |
 | `config ... --remote-lower sha256:abc=167936 --repo-blob-url URL` | Add a streamed lower |
-| `config ... --remote-lower-dir PATH` | Let overlaybd persist that lower's fetched blocks; pairs positionally |
+| `config ... --remote-lower sha256:abc=167936=/cache/dir` | ...and let overlaybd persist that layer's fetched blocks there |
 | `device up --name poc_a --config C --result-file R --naa-suffix 0021 [--mount P] [--read-only] [--subdir S]` | Launch, optionally mount, and leave running |
 | `device down --name poc_a --naa-suffix 0021 [--mount P]` | Unmount and tear down |
 | `cleanup [--mount A --mount B]` | Remove leftovers from an interrupted run |
@@ -355,6 +355,11 @@ tag that disagrees with `make version` before it uploads anything. Running the
 workflow by hand builds the same packages and leaves them as run artifacts,
 which is how to test a change to it without cutting a release. The arm64 jobs
 use GitHub's arm runners, free on public repositories.
+
+A `vX.Y.Z-rcN` tag builds and publishes the same packages as a pre-release but
+never touches crates.io, which is how a packaging or CLI change gets installed
+from a real artifact before the version it rehearses becomes permanent. See
+[docs/internal/publish.md](docs/internal/publish.md).
 
 Every push and pull request runs `.github/workflows/ci.yml`: `make lint`,
 `make check`, `make doc`, `make test`, a packaging build, and `make

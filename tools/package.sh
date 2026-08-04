@@ -83,7 +83,18 @@ fi
 
 if [[ "$WHAT" == "rpm" || "$WHAT" == "all" ]]; then
   info "building the rpm"
-  cargo generate-rpm --output "$OUT_DIR" >/dev/null
+  # An rpm version cannot contain '-', which is exactly what a SemVer
+  # pre-release uses: cargo-generate-rpm refuses "0.1.2-rc1" outright. Debian's
+  # convention for the same thing is '~', which also sorts before the release,
+  # and cargo-deb already translates it that way on its own - this does the same
+  # for the rpm rather than letting a pre-release build fail on one format only.
+  version="$(cargo pkgid | sed 's/.*[#@]//')"
+  rpm_args=()
+  if [[ "$version" == *-* ]]; then
+    rpm_args=(-s "version=\"${version//-/\~}\"")
+    info "pre-release: naming the rpm ${version//-/\~} (rpm versions cannot contain '-')"
+  fi
+  cargo generate-rpm --output "$OUT_DIR" "${rpm_args[@]}" >/dev/null
   while IFS= read -r package; do built+=("$package"); done < <(find "$OUT_DIR" -name '*.rpm' -newermt '-5 minutes')
 fi
 

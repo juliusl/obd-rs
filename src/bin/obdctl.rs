@@ -117,6 +117,12 @@ struct ConfigArgs {
     /// A streamed lower, as `sha256:...=SIZE`. Repeat for more.
     #[arg(long = "remote-lower", value_name = "DIGEST=SIZE")]
     remote_lowers: Vec<String>,
+    /// Where overlaybd may persist the blocks it fetches for a streamed lower.
+    ///
+    /// Pairs positionally with `--remote-lower`: give it once per streamed
+    /// lower, or not at all. An empty value leaves that one purely streamed.
+    #[arg(long = "remote-lower-dir", value_name = "PATH")]
+    remote_lower_dirs: Vec<PathBuf>,
     /// Base URL for streamed lowers, e.g. `https://REGISTRY/v2/REPO/blobs`
     #[arg(long)]
     repo_blob_url: Option<String>,
@@ -326,20 +332,48 @@ fn layer(cmd: &LayerCommand, json: bool) -> color_eyre::Result<()> {
     Ok(())
 }
 
-#[instrument(level = "info", skip_all, name = "obdctl::config")]
-fn config(args: &ConfigArgs, json: bool) -> color_eyre::Result<()> {
-    let mut config = DeviceConfig::new(&args.result_file);
-    for path in &args.lowers {
-        config = config.lower(Lower::file(path));
+/// Build the streamed lowers from `--remote-lower` and `--remote-lower-dir`.
+///
+/// The dirs pair positionally with the specs, so the rule is all or nothing:
+/// anything else silently attaches a cache directory to the wrong layer.
+fn remote_lowers(specs: &[String], dirs: &[PathBuf]) -> color_eyre::Result<Vec<Lower>> {
+    if !dirs.is_empty() && dirs.len() != specs.len() {
+        return Err(color_eyre::eyre::eyre!(
+            "--remote-lower-dir must be given once per --remote-lower, or not at all \
+             ({} dir(s) for {} streamed lower(s)); pass an empty value to leave one \
+             purely streamed",
+            dirs.len(),
+            specs.len()
+        ));
     }
-    for spec in &args.remote_lowers {
+
+    let mut lowers = Vec::with_capacity(specs.len());
+    for (index, spec) in specs.iter().enumerate() {
         let (digest, size) = spec
             .split_once('=')
             .ok_or_else(|| color_eyre::eyre::eyre!("--remote-lower must be DIGEST=SIZE: {spec}"))?;
         let size: u64 = size
             .parse()
             .wrap_err_with(|| format!("--remote-lower size must be a byte count: {spec}"))?;
-        config = config.lower(Lower::remote(digest, size)?);
+        let mut lower = Lower::remote(digest, size)?;
+        // An absent or empty dir keeps that layer purely streamed, which is
+        // what overlaybd does when the key is missing.
+        if let Some(dir) = dirs.get(index).filter(|dir| !dir.as_os_str().is_empty()) {
+            lower = lower.with_cache_dir(dir);
+        }
+        lowers.push(lower);
+    }
+    Ok(lowers)
+}
+
+#[instrument(level = "info", skip_all, name = "obdctl::config")]
+fn config(args: &ConfigArgs, json: bool) -> color_eyre::Result<()> {
+    let mut config = DeviceConfig::new(&args.result_file);
+    for path in &args.lowers {
+        config = config.lower(Lower::file(path));
+    }
+    for lower in remote_lowers(&args.remote_lowers, &args.remote_lower_dirs)? {
+        config = config.lower(lower);
     }
     if let Some(url) = &args.repo_blob_url {
         config = config.repo_blob_url(url);
@@ -468,5 +502,67 @@ fn report_swept(swept: &obd::Swept) {
     }
     if swept.is_empty() {
         println!("nothing to clean up");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_lowers;
+    use obd::DeviceConfig;
+    use std::path::PathBuf;
+
+    fn specs(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn dirs(values: &[&str]) -> Vec<PathBuf> {
+        values.iter().map(PathBuf::from).collect()
+    }
+
+    /// Render the lowers the way the daemon will read them.
+    fn rendered(specs: &[String], dirs: &[PathBuf]) -> serde_json::Value {
+        let mut config = DeviceConfig::new("/result").repo_blob_url("https://example/v2/x/blobs");
+        for lower in remote_lowers(specs, dirs).expect("builds") {
+            config = config.lower(lower);
+        }
+        serde_json::from_str(&config.to_json().expect("renders")).expect("valid json")
+    }
+
+    /// The dir has to land on the layer it was typed next to, so this pins the
+    /// pairing rather than the count.
+    #[test]
+    fn a_cache_dir_pairs_with_the_lower_at_the_same_position() {
+        let config = rendered(
+            &specs(&["sha256:aa=10", "sha256:bb=20"]),
+            &dirs(&["", "/cache/bb"]),
+        );
+        assert!(config["lowers"][0].get("dir").is_none(), "{config}");
+        assert_eq!(config["lowers"][1]["dir"], serde_json::json!("/cache/bb"));
+    }
+
+    #[test]
+    fn no_dirs_leaves_every_streamed_lower_alone() {
+        let config = rendered(&specs(&["sha256:aa=10"]), &[]);
+        assert!(config["lowers"][0].get("dir").is_none(), "{config}");
+        assert_eq!(
+            config["lowers"][0]["digest"],
+            serde_json::json!("sha256:aa")
+        );
+    }
+
+    #[test]
+    fn a_partial_list_of_dirs_is_refused() {
+        let err = remote_lowers(
+            &specs(&["sha256:aa=10", "sha256:bb=20"]),
+            &dirs(&["/cache/only-one"]),
+        )
+        .expect_err("ambiguous pairing must not be guessed");
+        assert!(err.to_string().contains("once per --remote-lower"), "{err}");
+    }
+
+    #[test]
+    fn a_spec_without_a_size_is_refused() {
+        let err = remote_lowers(&specs(&["sha256:aa"]), &[]).expect_err("needs DIGEST=SIZE");
+        assert!(err.to_string().contains("DIGEST=SIZE"), "{err}");
     }
 }

@@ -72,30 +72,46 @@ A `release: published` trigger would therefore never fire, silently.
 ### Rehearsing a release
 
 A change to the packages or the CLI is only really proven once it is installed
-from a published artifact and driven on a real host. A SemVer pre-release tag
-does that without spending anything permanent:
+from a published artifact and driven on a real host. A SemVer pre-release does
+that without spending anything permanent.
 
-```bash
-git tag -a v0.1.2-rc1 -m "obd-rs 0.1.2-rc1" && git push origin v0.1.2-rc1
-```
+The manifest carries the candidate version, not just the tag. Everything is
+named from `Cargo.toml` — that is the invariant the tag check enforces — so a
+candidate built from a manifest reading `0.1.2` would produce packages called
+`0.1.2` and be indistinguishable from the release it is rehearsing.
 
-That builds all four packages, publishes a GitHub release marked pre-release,
-and **stops before crates.io** — `publish.yml` runs its preflight and skips the
-publish job, because a crates.io version can never be replaced and is not worth
-spending on a rehearsal. The artifacts are then real, downloadable packages:
+1. **Bump to the candidate** in a pull request: `version = "0.1.2-rc1"`.
+2. **Tag it.**
 
-```bash
-make validate-azure DISTRO=azurelinux3 VERSION=v0.1.2-rc1
-OBD_RS_VERSION=v0.1.2-rc1 sudo ./setup.sh     # in the PoC checkout
-```
+   ```bash
+   git tag -a v0.1.2-rc1 -m "obd-rs 0.1.2-rc1" && git push origin v0.1.2-rc1
+   ```
+
+   That builds all four packages, publishes a GitHub release marked
+   pre-release, and **stops before crates.io** — `publish.yml` runs its
+   preflight and skips the publish job, because a crates.io version can never
+   be replaced and is not worth spending on a rehearsal.
+
+3. **Validate the artifacts**, which are now real and downloadable:
+
+   ```bash
+   make validate-azure DISTRO=azurelinux3 VERSION=v0.1.2-rc1
+   OBD_RS_VERSION=v0.1.2-rc1 sudo ./setup.sh     # in the PoC checkout
+   ```
+
+4. **Bump to the release** in a second pull request: `version = "0.1.2"`, then
+   tag `v0.1.2`. That publishes the packages and the crate.
+
+Two bumps per release is the cost of the manifest being the only source of the
+version. A tag that disagrees with it is refused, and a candidate that has been
+tagged cannot be re-pointed: `refs/tags/v*` blocks deletion and non-fast-forward
+with no bypass, so a botched candidate becomes `-rc2` rather than a moved tag.
 
 Two details the formats force. An rpm version cannot contain `-`, so
 `tools/package.sh` names the rpm `0.1.2~rc1`; cargo-deb already does the same
 for the deb, and `~` sorts before the release in both. And the changelog check
 looks for the section of the release being rehearsed, so `0.1.2-rc1` is
 documented by `## [0.1.2]`.
-
-When the rehearsal passes, tag `v0.1.2` and the crate publishes.
 
 ## What is checked before anything is uploaded
 
@@ -125,3 +141,31 @@ internal docs. None of it is actionable from an unpacked tarball, and
 The library, `obdctl`, `build.rs`, the packaging assets under `lib/`, the
 scripts the README refers to and the test suites all ship: 35 files, 74 KiB
 compressed at v0.1.0.
+
+## How the workflows are built
+
+`release.yml` builds each package on the distribution it targets, because
+`obdctl` links glibc and a package carries the glibc requirement of whatever
+built it. Adding a distribution is therefore a job rather than a flag.
+
+| Job | Runs on | Produces |
+| --- | --- | --- |
+| `deb` | `ubuntu-24.04` and `ubuntu-24.04-arm` | `obd-rs_X.Y.Z-1_amd64.deb`, `..._arm64.deb` |
+| `rpm` | The same runners, inside `mcr.microsoft.com/azurelinux/base/core:3.0` | `obd-rs-X.Y.Z-1.x86_64.rpm`, `...aarch64.rpm` |
+| `publish` | `ubuntu-24.04` | The GitHub release, plus `SHA256SUMS` |
+
+The Azure Linux image carries neither a toolchain nor the headers a Rust build
+needs, so that job installs `gcc`, `glibc-devel`, `kernel-headers` and
+`binutils` before it starts. The hosted Ubuntu images already have everything
+but the packaging tools, which `OBD_PACKAGE_INSTALL_TOOLS=1` tells
+`tools/package.sh` to install rather than refuse over. The arm64 jobs use
+GitHub's arm runners, free on public repositories.
+
+Running `release.yml` by hand builds the same packages and leaves them as run
+artifacts, which is how to test a change to it without cutting a release.
+
+`ci.yml` runs `make lint`, `make check`, `make doc`, `make test`, a packaging
+build and `make publish-check` on every push and pull request. The two device
+suites are absent by necessity — they need a kernel with TCMU, root and a
+running daemon, which a hosted runner does not provide — so `make verify`
+remains the bar a branch clears locally.

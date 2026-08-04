@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "obd-rs"
-version = "0.1.2"
+version = "0.1.2-rc2"
 dependencies = [
  "cap-std",
  "clap",

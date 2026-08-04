@@ -14,6 +14,13 @@ CARGO ?= cargo
 OBDCTL := ./target/debug/obdctl
 # The name .devcontainer/devcontainer.json pins with runArgs.
 CONTAINER ?= obd-rs-dev
+# Which published package `make validate-azure` puts on a VM, and from which
+# release. The version defaults to what the packages would be named after.
+# The hash is escaped because make would otherwise take it as a comment and
+# swallow the rest of the line - a recipe line, like the `version` target
+# below, needs no escaping.
+DISTRO ?= azurelinux3
+VERSION ?= v$(shell $(CARGO) pkgid | sed 's/.*[\#@]//')
 
 UNAME_S := $(shell uname -s)
 
@@ -50,7 +57,7 @@ endif
 
 .PHONY: help quickstart build check doc clean fmt lint test test-device \
         test-e2e verify preflight cleanup install-overlaybd baselayer \
-        package package-deb package-rpm version dev dev-shell \
+        package package-deb package-rpm version validate-azure dev dev-shell \
         dev-stop dev-rebuild dev-status
 
 ##@ General
@@ -139,6 +146,13 @@ package-deb: ## Build only the deb
 
 package-rpm: ## Build only the rpm
 	$(LINUX_RUN) ./tools/package.sh rpm
+
+# The one thing this repository cannot check on the machine that builds it:
+# obdctl carries the glibc of its build host, the unit drop-in only means
+# something where systemd runs, and the postinst needs a kernel with TCMU.
+# DISTRO picks which published asset is under test.
+validate-azure: ## Validate a published package on a fresh Azure VM (DISTRO=azurelinux3|ubuntu24)
+	./tools/az-validate.sh --distro $(DISTRO) --version $(VERSION)
 
 # The release workflow checks the tag against this before it publishes: a
 # vX.Y.Z tag that does not match produces packages named after the manifest,

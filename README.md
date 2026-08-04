@@ -199,6 +199,7 @@ choosing a report handler belongs to the binary.
 | `.github/workflows/` | CI on every push, and the tagged release build |
 | `tools/dev.sh` | Creates, repairs and enters the devcontainer |
 | `tools/package.sh` | Builds the deb and the rpm |
+| `tools/az-validate.sh` | Validates a published package on a fresh Azure VM |
 | `tools/shellcheck.sh` | Lints every shell script in the repository |
 
 ## Installation
@@ -298,6 +299,35 @@ release ships glibc 2.38. The wiring itself is portable — `containerd-overlayb
 1.0.18-2.azl3` has the same layout as the Ubuntu build, binaries under
 `/usr/bin/overlaybd` and a unit pointing at `/opt/overlaybd/bin`, so the same
 drop-in corrects both.
+
+### Validating a published package
+
+A package is the one artifact this repository cannot check on the machine that
+builds it: the glibc requirement belongs to the build host, the unit drop-in
+only means something where systemd is running, and the postinst needs a kernel
+with TCMU. `make validate-azure` puts a published asset on a fresh VM of the
+distribution it targets and holds it to the same bar as a working tree:
+
+```bash
+make validate-azure DISTRO=azurelinux3   # the x86_64 rpm
+make validate-azure DISTRO=ubuntu24      # the amd64 deb
+```
+
+It installs the release asset the way a user would — repository first, then the
+package manager, so the `containerd-overlaybd` dependency really is resolved —
+then checks the unit, runs `obdctl preflight`, runs `tests/lima-e2e.sh` against
+the *packaged* `/usr/bin/obdctl`, removes the package and reports what it left
+behind. The resource group is deleted on the way out, including after a
+failure.
+
+v0.1.0 was validated this way on Azure Linux 3.0 (kernel 6.6.143.1-1.azl3):
+`tdnf` pulled `containerd-overlaybd 1.0.18-2.azl3` as a dependency, the postinst
+generated the baselayer and loaded both modules, `overlaybd-tcmu` came up
+`enabled`/`active` with `ExecStart=/usr/bin/overlaybd/overlaybd-tcmu` from the
+drop-in, preflight passed all nine checks, `tests/lima-e2e.sh` passed, and
+removal left none of `/usr/bin/obdctl`, `/etc/overlaybd`,
+`/opt/overlaybd/baselayers`, `/usr/share/obd-rs` or the drop-in directory
+behind.
 
 ### Releases
 
